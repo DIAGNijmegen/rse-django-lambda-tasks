@@ -94,7 +94,7 @@ All new functions and methods use kwargs-only signatures (enforced by `*`).
   - Add `to_json(self, **kwargs: Any) -> dict`:
     - Pop `_delay` / `_queue` overrides (same resolution logic as `on_commit`)
     - Validate remaining kwargs via `self._kwargs_model.model_validate(kwargs)`
-    - Build `SQSLambdaTaskMessage(task_name=..., invocation_id=str(uuid.uuid4()), kwargs=...)`
+    - Build `SQSLambdaTaskMessage(task_name=..., kwargs=...)`
     - Return `SQSLambdaSQSLambdaTaskMessage(message=task_message, delay=delay, queue=queue).model_dump()`
   - Add `enqueue_from_json(self, *, data: dict) -> None`:
     - Validate via `SQSLambdaSQSLambdaTaskMessage.model_validate(data)`

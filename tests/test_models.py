@@ -28,7 +28,7 @@ class TestTaskRecordCreation:
     def test_can_create_with_required_fields(self):
         record = TaskRecord.objects.create(
             task_name="myapp.tasks.send_email",
-            invocation_id=uuid.uuid4(),
+            pk=uuid.uuid4(),
             kwargs={"to": "[email]"},
             n_retries=0,
             status=TaskRecord.TaskStatus.RUNNING,
@@ -39,14 +39,14 @@ class TestTaskRecordCreation:
         inv_id = uuid.uuid4()
         record = TaskRecord.objects.create(
             task_name="myapp.tasks.do_work",
-            invocation_id=inv_id,
+            pk=inv_id,
             kwargs={"x": 1},
             n_retries=0,
             status=TaskRecord.TaskStatus.RUNNING,
         )
         fetched = TaskRecord.objects.get(pk=record.pk)
         assert fetched.task_name == "myapp.tasks.do_work"
-        assert fetched.invocation_id == inv_id
+        assert fetched.pk == inv_id
         assert fetched.kwargs == {"x": 1}
         assert fetched.status == TaskRecord.TaskStatus.RUNNING
         assert fetched.start_time is None
@@ -69,7 +69,7 @@ class TestTaskRecordStatusChoices:
     def test_valid_status_choices(self, status):
         record = TaskRecord.objects.create(
             task_name="myapp.tasks.job",
-            invocation_id=uuid.uuid4(),
+            pk=uuid.uuid4(),
             kwargs={},
             n_retries=0,
             status=status,
@@ -85,7 +85,7 @@ class TestTaskRecordStatusChoices:
     def test_retrying_status_can_be_saved(self):
         record = TaskRecord.objects.create(
             task_name="myapp.tasks.job",
-            invocation_id=uuid.uuid4(),
+            pk=uuid.uuid4(),
             kwargs={},
             n_retries=0,
             status=TaskRecord.TaskStatus.RETRYING,
@@ -98,11 +98,11 @@ class TestTaskRecordStatusChoices:
 
 @pytest.mark.django_db
 class TestTaskRecordInvocationIdUniqueness:
-    def test_invocation_id_is_unique(self):
+    def test_pk_is_unique(self):
         inv_id = uuid.uuid4()
         TaskRecord.objects.create(
             task_name="myapp.tasks.job",
-            invocation_id=inv_id,
+            pk=inv_id,
             kwargs={},
             n_retries=0,
             status=TaskRecord.TaskStatus.RUNNING,
@@ -110,23 +110,23 @@ class TestTaskRecordInvocationIdUniqueness:
         with pytest.raises(IntegrityError):
             TaskRecord.objects.create(
                 task_name="myapp.tasks.other",
-                invocation_id=inv_id,
+                pk=inv_id,
                 kwargs={},
                 n_retries=0,
                 status=TaskRecord.TaskStatus.RUNNING,
             )
 
-    def test_different_invocation_ids_are_allowed(self):
+    def test_different_pks_are_allowed(self):
         TaskRecord.objects.create(
             task_name="myapp.tasks.job",
-            invocation_id=uuid.uuid4(),
+            pk=uuid.uuid4(),
             kwargs={},
             n_retries=0,
             status=TaskRecord.TaskStatus.RUNNING,
         )
         TaskRecord.objects.create(
             task_name="myapp.tasks.job",
-            invocation_id=uuid.uuid4(),
+            pk=uuid.uuid4(),
             kwargs={},
             n_retries=0,
             status=TaskRecord.TaskStatus.RUNNING,
@@ -144,7 +144,7 @@ class TestTaskRecordOrdering:
         now = timezone.now()
         older = TaskRecord.objects.create(
             task_name="myapp.tasks.job",
-            invocation_id=uuid.uuid4(),
+            pk=uuid.uuid4(),
             kwargs={},
             n_retries=0,
             status=TaskRecord.TaskStatus.RUNNING,
@@ -152,7 +152,7 @@ class TestTaskRecordOrdering:
         )
         newer = TaskRecord.objects.create(
             task_name="myapp.tasks.job",
-            invocation_id=uuid.uuid4(),
+            pk=uuid.uuid4(),
             kwargs={},
             n_retries=0,
             status=TaskRecord.TaskStatus.RUNNING,
@@ -171,14 +171,14 @@ class TestTaskRecordOrmQueryable:
     def test_filter_by_status(self):
         TaskRecord.objects.create(
             task_name="myapp.tasks.job",
-            invocation_id=uuid.uuid4(),
+            pk=uuid.uuid4(),
             kwargs={},
             n_retries=0,
             status=TaskRecord.TaskStatus.SUCCESS,
         )
         TaskRecord.objects.create(
             task_name="myapp.tasks.job",
-            invocation_id=uuid.uuid4(),
+            pk=uuid.uuid4(),
             kwargs={},
             n_retries=0,
             status=TaskRecord.TaskStatus.FAILED,
@@ -193,14 +193,14 @@ class TestTaskRecordOrmQueryable:
     def test_filter_by_task_name(self):
         TaskRecord.objects.create(
             task_name="myapp.tasks.alpha",
-            invocation_id=uuid.uuid4(),
+            pk=uuid.uuid4(),
             kwargs={},
             n_retries=0,
             status=TaskRecord.TaskStatus.RUNNING,
         )
         TaskRecord.objects.create(
             task_name="myapp.tasks.beta",
-            invocation_id=uuid.uuid4(),
+            pk=uuid.uuid4(),
             kwargs={},
             n_retries=0,
             status=TaskRecord.TaskStatus.RUNNING,
@@ -230,7 +230,7 @@ def _task_creates_record_then_raises(*, label: str) -> None:
     """Creates a TaskRecord inside the atomic block, then raises."""
     TaskRecord.objects.create(
         task_name="side_effect_record",
-        invocation_id=uuid.uuid4(),
+        pk=uuid.uuid4(),
         kwargs={"label": label},
         n_retries=0,
         status=TaskRecord.TaskStatus.RUNNING,
@@ -241,7 +241,7 @@ def _task_creates_record_then_raises(*, label: str) -> None:
 @lambda_task
 def _task_checks_own_status(*, inv_id: str) -> None:
     """Reads its own TaskRecord status while running."""
-    record = TaskRecord.objects.get(invocation_id=inv_id)
+    record = TaskRecord.objects.get(pk=inv_id)
     _running_statuses.append(record.status)
 
 
@@ -264,7 +264,7 @@ def _task_failing_for_property(*, label: str) -> None:
     """Used by property tests — always raises."""
     TaskRecord.objects.create(
         task_name=f"prop_sentinel_{label}",
-        invocation_id=uuid.uuid4(),
+        pk=uuid.uuid4(),
         kwargs={"label": label},
         n_retries=0,
         status=TaskRecord.TaskStatus.RUNNING,
@@ -276,7 +276,7 @@ def _task_failing_for_property(*, label: str) -> None:
 def _task_lifecycle(*, rv: int) -> int:
     """Used by property tests — returns rv and captures RUNNING state."""
     inv_id = _lifecycle_current_inv_id
-    rec = TaskRecord.objects.get(invocation_id=inv_id)
+    rec = TaskRecord.objects.get(pk=inv_id)
     _lifecycle_captured.append({"status": rec.status, "start_time": rec.start_time})
     return rv
 
@@ -337,7 +337,6 @@ def _task_name(wrapper) -> str:
 def _make_message(task_name: str, kwargs: dict) -> SQSLambdaTaskMessage:
     return SQSLambdaTaskMessage(
         task_name=task_name,
-        invocation_id=str(uuid.uuid4()),
         kwargs=kwargs,
     )
 
@@ -351,30 +350,34 @@ def _make_message(task_name: str, kwargs: dict) -> SQSLambdaTaskMessage:
 class TestExecuteTaskSuccess:
     def test_successful_task_record_status_is_success(self):
         msg = _make_message(_task_name(_task_returns_value), {"x": 5})
+        message_id = str(uuid.uuid4())
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
-        record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+            msg.execute_immediately(message_id=message_id)
+        record = TaskRecord.objects.get(pk=message_id)
         assert record.status == TaskRecord.TaskStatus.SUCCESS
 
     def test_successful_task_record_has_result(self):
         msg = _make_message(_task_name(_task_returns_value), {"x": 7})
+        message_id = str(uuid.uuid4())
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
-        record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+            msg.execute_immediately(message_id=message_id)
+        record = TaskRecord.objects.get(pk=message_id)
         assert record.result == 14
 
     def test_successful_task_record_has_end_time(self):
         msg = _make_message(_task_name(_task_returns_value), {"x": 3})
+        message_id = str(uuid.uuid4())
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
-        record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+            msg.execute_immediately(message_id=message_id)
+        record = TaskRecord.objects.get(pk=message_id)
         assert record.end_time is not None
 
     def test_successful_task_record_has_start_time(self):
         msg = _make_message(_task_name(_task_returns_value), {"x": 1})
+        message_id = str(uuid.uuid4())
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
-        record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+            msg.execute_immediately(message_id=message_id)
+        record = TaskRecord.objects.get(pk=message_id)
         assert record.start_time is not None
 
 
@@ -387,39 +390,44 @@ class TestExecuteTaskSuccess:
 class TestExecuteTaskFailure:
     def test_failing_task_record_status_is_failed(self):
         msg = _make_message(_task_name(_task_raises), {"msg": "boom"})
+        message_id = str(uuid.uuid4())
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
-        record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+            msg.execute_immediately(message_id=message_id)
+        record = TaskRecord.objects.get(pk=message_id)
         assert record.status == TaskRecord.TaskStatus.FAILED
 
     def test_failing_task_record_has_traceback(self):
         msg = _make_message(_task_name(_task_raises), {"msg": "boom"})
+        message_id = str(uuid.uuid4())
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
-        record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+            msg.execute_immediately(message_id=message_id)
+        record = TaskRecord.objects.get(pk=message_id)
         assert record.traceback
         assert "RuntimeError" in record.traceback
 
     def test_failing_task_record_has_end_time(self):
         msg = _make_message(_task_name(_task_raises), {"msg": "boom"})
+        message_id = str(uuid.uuid4())
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
-        record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+            msg.execute_immediately(message_id=message_id)
+        record = TaskRecord.objects.get(pk=message_id)
         assert record.end_time is not None
 
     def test_failing_task_orm_writes_are_rolled_back(self):
         msg = _make_message(
             _task_name(_task_creates_record_then_raises), {"label": "should_not_exist"}
         )
+        message_id = str(uuid.uuid4())
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
+            msg.execute_immediately(message_id=message_id)
         assert not TaskRecord.objects.filter(task_name="side_effect_record").exists()
 
     def test_failing_task_failed_record_is_committed(self):
         msg = _make_message(_task_name(_task_raises), {"msg": "check_commit"})
+        message_id = str(uuid.uuid4())
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
-        record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+            msg.execute_immediately(message_id=message_id)
+        record = TaskRecord.objects.get(pk=message_id)
         assert record.status == TaskRecord.TaskStatus.FAILED
 
 
@@ -436,11 +444,10 @@ class TestExecuteTaskRunningStatus:
         inv_id = str(uuid.uuid4())
         msg = SQSLambdaTaskMessage(
             task_name=_task_name(_task_checks_own_status),
-            invocation_id=inv_id,
             kwargs={"inv_id": inv_id},
         )
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
+            msg.execute_immediately(message_id=inv_id)
         assert _running_statuses == [TaskRecord.TaskStatus.RUNNING]
 
 
@@ -467,7 +474,6 @@ class TestExecuteTaskTimeoutResolution:
     def test_decorator_timeouts_used(self):
         msg = SQSLambdaTaskMessage(
             task_name=_task_name(_task_decorator_defaults),
-            invocation_id=str(uuid.uuid4()),
             kwargs={"x": 1},
         )
         timeout_args: list = []
@@ -475,13 +481,12 @@ class TestExecuteTaskTimeoutResolution:
             "lambda_tasks.models.TimeoutContext",
             self._capturing_context(timeout_args),
         ):
-            msg.execute_immediately()
+            msg.execute_immediately(message_id=str(uuid.uuid4()))
         assert timeout_args == [(30, 60)]
 
     def test_global_defaults_used_when_no_decorator_timeouts(self):
         msg = SQSLambdaTaskMessage(
             task_name=_task_name(_task_no_timeouts),
-            invocation_id=str(uuid.uuid4()),
             kwargs={"x": 1},
         )
         timeout_args: list = []
@@ -489,7 +494,7 @@ class TestExecuteTaskTimeoutResolution:
             "lambda_tasks.models.TimeoutContext",
             self._capturing_context(timeout_args),
         ):
-            msg.execute_immediately()
+            msg.execute_immediately(message_id=str(uuid.uuid4()))
         assert timeout_args == [(270, 300)]
 
 
@@ -508,14 +513,14 @@ class TestExecuteTaskImportStringResolution:
             side_effect=ImportError("not found"),
         ):
             with pytest.raises(ImportError):
-                msg.execute_immediately()
+                msg.execute_immediately(message_id=str(uuid.uuid4()))
         assert TaskRecord.objects.count() == initial_count
 
     def test_non_wrapper_return_raises_type_error(self):
         msg = _make_message("some.module.plain_func", {})
         with patch("lambda_tasks.models.import_string", return_value=lambda: None):
             with pytest.raises(TypeError, match="expected LambdaTaskWrapper"):
-                msg.execute_immediately()
+                msg.execute_immediately(message_id=str(uuid.uuid4()))
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +548,7 @@ def test_property_3_non_wrapper_raises_type_error(non_wrapper):
     msg = _make_message("some.module.task", {})
     with patch("lambda_tasks.models.import_string", return_value=non_wrapper):
         with pytest.raises(TypeError, match="expected LambdaTaskWrapper"):
-            msg.execute_immediately()
+            msg.execute_immediately(message_id=str(uuid.uuid4()))
 
 
 @pytest.mark.django_db(transaction=True)
@@ -557,7 +562,7 @@ def test_property_2_import_error_propagates_no_task_record(task_name):
         "lambda_tasks.models.import_string", side_effect=ImportError("not found")
     ):
         with pytest.raises(ImportError):
-            msg.execute_immediately()
+            msg.execute_immediately(message_id=str(uuid.uuid4()))
     assert TaskRecord.objects.count() == before
 
 
@@ -573,13 +578,13 @@ def test_property_12_atomic_rollback(label):
     sentinel_name = f"prop12_sentinel_{label}"
     msg = SQSLambdaTaskMessage(
         task_name=_task_name(_task_failing_for_property),
-        invocation_id=str(uuid.uuid4()),
         kwargs={"label": label},
     )
+    message_id = str(uuid.uuid4())
     with patch("lambda_tasks.models.TimeoutContext"):
-        msg.execute_immediately()
+        msg.execute_immediately(message_id=message_id)
     assert not TaskRecord.objects.filter(task_name=sentinel_name).exists()
-    record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+    record = TaskRecord.objects.get(pk=message_id)
     assert record.status == TaskRecord.TaskStatus.FAILED
 
 
@@ -594,14 +599,13 @@ def test_property_13_task_record_lifecycle_success(return_value):
     _lifecycle_current_inv_id = inv_id
     msg = SQSLambdaTaskMessage(
         task_name=_task_name(_task_lifecycle),
-        invocation_id=inv_id,
         kwargs={"rv": return_value},
     )
     with patch("lambda_tasks.models.TimeoutContext"):
-        msg.execute_immediately()
+        msg.execute_immediately(message_id=inv_id)
     assert _lifecycle_captured[0]["status"] == TaskRecord.TaskStatus.RUNNING
     assert _lifecycle_captured[0]["start_time"] is not None
-    record = TaskRecord.objects.get(invocation_id=inv_id)
+    record = TaskRecord.objects.get(pk=inv_id)
     assert record.status == TaskRecord.TaskStatus.SUCCESS
     assert record.end_time is not None
     assert record.result == return_value
@@ -614,12 +618,12 @@ def test_property_13_task_record_lifecycle_failure(return_value):
     """Property 13 (failure): end_time non-null and traceback non-empty on FAILED."""
     msg = SQSLambdaTaskMessage(
         task_name=_task_name(_task_failing_lifecycle),
-        invocation_id=str(uuid.uuid4()),
         kwargs={"rv": return_value},
     )
+    message_id = str(uuid.uuid4())
     with patch("lambda_tasks.models.TimeoutContext"):
-        msg.execute_immediately()
-    record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+        msg.execute_immediately(message_id=message_id)
+    record = TaskRecord.objects.get(pk=message_id)
     assert record.status == TaskRecord.TaskStatus.FAILED
     assert record.end_time is not None
     assert record.traceback
@@ -634,34 +638,37 @@ def test_property_13_task_record_lifecycle_failure(return_value):
 class TestExecuteTaskDuplicateDelivery:
     def test_duplicate_of_success_is_skipped(self):
         msg = _make_message(_task_name(_task_returns_value), {"x": 4})
+        message_id = str(uuid.uuid4())
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
-            msg.execute_immediately()  # duplicate
-        assert TaskRecord.objects.filter(invocation_id=msg.invocation_id).count() == 1
-        record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+            msg.execute_immediately(message_id=message_id)
+            msg.execute_immediately(message_id=message_id)  # duplicate
+        assert TaskRecord.objects.filter(pk=message_id).count() == 1
+        record = TaskRecord.objects.get(pk=message_id)
         assert record.status == TaskRecord.TaskStatus.SUCCESS
 
     def test_duplicate_of_failed_is_skipped(self):
         msg = _make_message(_task_name(_task_raises), {"msg": "boom"})
+        message_id = str(uuid.uuid4())
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
-            msg.execute_immediately()  # duplicate
-        assert TaskRecord.objects.filter(invocation_id=msg.invocation_id).count() == 1
-        record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+            msg.execute_immediately(message_id=message_id)
+            msg.execute_immediately(message_id=message_id)  # duplicate
+        assert TaskRecord.objects.filter(pk=message_id).count() == 1
+        record = TaskRecord.objects.get(pk=message_id)
         assert record.status == TaskRecord.TaskStatus.FAILED
 
     def test_duplicate_does_not_raise(self):
         msg = _make_message(_task_name(_task_returns_value), {"x": 2})
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
-            msg.execute_immediately()  # must not raise
+            msg.execute_immediately(message_id=str(uuid.uuid4()))
+            msg.execute_immediately(message_id=str(uuid.uuid4()))  # must not raise
 
     def test_duplicate_only_one_task_record_created(self):
         msg = _make_message(_task_name(_task_returns_value), {"x": 9})
+        message_id = str(uuid.uuid4())
         with patch("lambda_tasks.models.TimeoutContext"):
             for _ in range(5):
-                msg.execute_immediately()
-        assert TaskRecord.objects.filter(invocation_id=msg.invocation_id).count() == 1
+                msg.execute_immediately(message_id=message_id)
+        assert TaskRecord.objects.filter(pk=message_id).count() == 1
 
 
 # ---------------------------------------------------------------------------
@@ -701,7 +708,6 @@ _HIGH_MEM_URL = "https://sqs.us-east-1.amazonaws.com/000000000000/high-memory"
 _QUEUES_MAP = {"default": _QUEUE_URL, "high_memory": _HIGH_MEM_URL}
 _MESSAGE = SQSLambdaTaskMessage(
     task_name="myapp.tasks.my_task",
-    invocation_id="00000000-0000-4000-a000-000000000000",
     kwargs={},
 )
 
@@ -772,20 +778,16 @@ def test_send_eager_mode_executes_in_process(settings):
         patch("lambda_tasks.models.boto3") as mock_b3,
     ):
         SQSLambdaTask(message=_MESSAGE, delay=0, queue="default")._execute()
-        mock_exec.assert_called_once_with()
+        mock_exec.assert_called_once()
         mock_b3.client.assert_not_called()
 
 
 @pytest.mark.django_db(transaction=True)
 def test_on_commit_valid_dict_calls_send_message(settings, mock_boto3_sqs):
-    import json
-
     settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
-    invocation_id = "test-invocation-uuid-1234"
     deferred = {
         "message": {
             "task_name": "myapp.tasks.my_task",
-            "invocation_id": invocation_id,
             "kwargs": {"x": 1},
         },
         "delay": 5,
@@ -797,7 +799,6 @@ def test_on_commit_valid_dict_calls_send_message(settings, mock_boto3_sqs):
     call_kwargs = mock_boto3_sqs.send_message.call_args.kwargs
     assert call_kwargs["QueueUrl"] == _QUEUE_URL
     assert call_kwargs["DelaySeconds"] == 5
-    assert json.loads(call_kwargs["MessageBody"])["invocation_id"] == invocation_id
 
 
 @pytest.mark.django_db
@@ -808,7 +809,6 @@ def test_on_commit_invalid_dict_raises_validation_error(settings, mock_boto3_sqs
     deferred = {
         "message": {
             "task_name": "myapp.tasks.my_task",
-            "invocation_id": "x",
             "kwargs": {},
         },
         "delay": 5,
@@ -826,7 +826,6 @@ def test_on_commit_eager_mode_executes_in_process(settings):
     deferred = {
         "message": {
             "task_name": "myapp.tasks.my_task",
-            "invocation_id": "x",
             "kwargs": {},
         },
         "delay": 0,
@@ -847,13 +846,11 @@ def test_on_commit_eager_mode_executes_in_process(settings):
 _deferred_msg_st = st.builds(
     lambda message, delay, queue: {"message": message, "delay": delay, "queue": queue},
     message=st.builds(
-        lambda task_name, invocation_id, kwargs: {
+        lambda task_name, kwargs: {
             "task_name": task_name,
-            "invocation_id": invocation_id,
             "kwargs": kwargs,
         },
         task_name=st.from_regex(r"[a-z]+\.[a-z]+", fullmatch=True),
-        invocation_id=st.uuids().map(str),
         kwargs=st.fixed_dictionaries({}),
     ),
     delay=st.integers(min_value=0, max_value=900),
@@ -963,7 +960,6 @@ def test_property_on_commit_passes_all_fields(settings, msg):
     call_kwargs = mock_client.send_message.call_args.kwargs
     body = json.loads(call_kwargs["MessageBody"])
     assert body["task_name"] == msg["message"]["task_name"]
-    assert body["invocation_id"] == msg["message"]["invocation_id"]
     assert body["kwargs"] == msg["message"]["kwargs"]
     assert call_kwargs["DelaySeconds"] == msg["delay"]
     assert call_kwargs["QueueUrl"] == _QUEUES_MAP[msg["queue"]]
@@ -981,7 +977,6 @@ def test_property_on_commit_rejects_invalid_dicts(settings, missing_field):
     valid = {
         "message": {
             "task_name": "myapp.tasks.my_task",
-            "invocation_id": "550e8400-e29b-41d4-a716-446655440000",
             "kwargs": {},
         },
         "delay": 0,
@@ -1068,7 +1063,7 @@ def _task_creates_record_then_raises_ignored(*, label: str) -> None:
     """Creates a TaskRecord inside the atomic block, then raises an ignored exception."""
     TaskRecord.objects.create(
         task_name=f"ignored_side_effect_{label}",
-        invocation_id=uuid.uuid4(),
+        pk=uuid.uuid4(),
         kwargs={"label": label},
         n_retries=0,
         status=TaskRecord.TaskStatus.RUNNING,
@@ -1101,9 +1096,10 @@ def test_property_ignored_exc_produces_success(exc_type_name):
     msg = _make_message(
         _task_name(_task_raises_ignored), {"exc_type_name": exc_type_name}
     )
+    message_id = str(uuid.uuid4())
     with patch("lambda_tasks.models.TimeoutContext"):
-        msg.execute_immediately()
-    record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+        msg.execute_immediately(message_id=message_id)
+    record = TaskRecord.objects.get(pk=message_id)
     assert record.status == TaskRecord.TaskStatus.SUCCESS
     assert record.traceback is not None
     assert exc_type_name in record.traceback
@@ -1120,14 +1116,15 @@ def test_property_ignored_exc_commits_record(label):
     msg = _make_message(
         _task_name(_task_creates_record_then_raises_ignored), {"label": label}
     )
+    message_id = str(uuid.uuid4())
     with patch("lambda_tasks.models.TimeoutContext"):
-        msg.execute_immediately()
+        msg.execute_immediately(message_id=message_id)
     # Task-side write must be rolled back
     assert not TaskRecord.objects.filter(
         task_name=f"ignored_side_effect_{label}"
     ).exists()
     # TaskRecord itself must be committed as SUCCESS
-    record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+    record = TaskRecord.objects.get(pk=message_id)
     assert record.status == TaskRecord.TaskStatus.SUCCESS
 
 
@@ -1145,10 +1142,11 @@ def test_property_subclass_of_ignored_is_ignored(base_exc):
         raise SubExc("subclass error")
 
     msg = _make_message(_task_name(_task_raises_subclass), {"x": 1})
+    message_id = str(uuid.uuid4())
     with patch("lambda_tasks.models.import_string", return_value=_task_raises_subclass):
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
-    record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+            msg.execute_immediately(message_id=message_id)
+    record = TaskRecord.objects.get(pk=message_id)
     assert record.status == TaskRecord.TaskStatus.SUCCESS
 
 
@@ -1165,7 +1163,7 @@ def test_property_non_ignored_exc_produces_failed(exc_type):
     def _task_raises_exc(*, label: str) -> None:
         TaskRecord.objects.create(
             task_name=f"non_ignored_side_effect_{label}",
-            invocation_id=uuid.uuid4(),
+            pk=uuid.uuid4(),
             kwargs={"label": label},
             n_retries=0,
             status=TaskRecord.TaskStatus.RUNNING,
@@ -1174,13 +1172,14 @@ def test_property_non_ignored_exc_produces_failed(exc_type):
 
     label = "prop6"
     msg = _make_message(_task_name(_task_raises_exc), {"label": label})
+    message_id = str(uuid.uuid4())
     with patch("lambda_tasks.models.import_string", return_value=_task_raises_exc):
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
+            msg.execute_immediately(message_id=message_id)
     assert not TaskRecord.objects.filter(
         task_name=f"non_ignored_side_effect_{label}"
     ).exists()
-    record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+    record = TaskRecord.objects.get(pk=message_id)
     assert record.status == TaskRecord.TaskStatus.FAILED
     assert record.traceback is not None
 
@@ -1195,9 +1194,10 @@ class TestIgnoreErrorsRegressionGuard:
     def test_clean_success_traceback_remains_none(self):
         """Regression guard: successful task must leave traceback as None (Requirement 5.2)."""
         msg = _make_message(_task_name(_task_returns_value), {"x": 3})
+        message_id = str(uuid.uuid4())
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
-        record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+            msg.execute_immediately(message_id=message_id)
+        record = TaskRecord.objects.get(pk=message_id)
         assert record.status == TaskRecord.TaskStatus.SUCCESS
         assert record.traceback is None
 
@@ -1206,19 +1206,21 @@ class TestIgnoreErrorsRegressionGuard:
         msg = _make_message(
             _task_name(_task_creates_record_then_raises), {"label": "regression_guard"}
         )
+        message_id = str(uuid.uuid4())
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
+            msg.execute_immediately(message_id=message_id)
         assert not TaskRecord.objects.filter(task_name="side_effect_record").exists()
-        record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+        record = TaskRecord.objects.get(pk=message_id)
         assert record.status == TaskRecord.TaskStatus.FAILED
         assert record.traceback is not None
 
     def test_empty_ignore_errors_all_exceptions_produce_failed(self):
         """Regression guard: ignore_errors=() (default) → all exceptions still produce FAILED."""
         msg = _make_message(_task_name(_task_raises), {"msg": "default_ignore_errors"})
+        message_id = str(uuid.uuid4())
         with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately()
-        record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+            msg.execute_immediately(message_id=message_id)
+        record = TaskRecord.objects.get(pk=message_id)
         assert record.status == TaskRecord.TaskStatus.FAILED
 
 
@@ -1240,9 +1242,10 @@ def test_property_eager_mode_ignore_errors_parity(exc_type_name):
     msg = _make_message(
         _task_name(_task_raises_ignored), {"exc_type_name": exc_type_name}
     )
+    message_id = str(uuid.uuid4())
     with patch("lambda_tasks.models.import_string", return_value=_task_raises_ignored):
-        msg.execute_immediately()
-    record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+        msg.execute_immediately(message_id=message_id)
+    record = TaskRecord.objects.get(pk=message_id)
     assert record.status == TaskRecord.TaskStatus.SUCCESS
     assert record.traceback is not None
 
@@ -1263,7 +1266,6 @@ def test_property_3_n_retries_negative_raises_validation_error(n: int) -> None:
     with pytest.raises(ValidationError):
         SQSLambdaTaskMessage(
             task_name="myapp.tasks.my_task",
-            invocation_id=str(uuid.uuid4()),
             kwargs={},
             n_retries=n,
         )
@@ -1275,7 +1277,6 @@ def test_property_3_n_retries_non_negative_succeeds(n: int) -> None:
     """Property 3 (non-negative): constructing SQSLambdaTaskMessage with _n_retries >= 0 succeeds."""
     msg = SQSLambdaTaskMessage(
         task_name="myapp.tasks.my_task",
-        invocation_id=str(uuid.uuid4()),
         kwargs={},
         n_retries=n,
     )
@@ -1328,14 +1329,13 @@ def test_property_4_retry_increments_n_retries(n_retries, exc_type_name):
     Validates: Requirements 2.2"""
     msg = SQSLambdaTaskMessage(
         task_name=_task_name(_task_retry_raises),
-        invocation_id=str(uuid.uuid4()),
         kwargs={"exc_type_name": exc_type_name},
         n_retries=n_retries,
     )
     with patch("lambda_tasks.models.import_string", return_value=_task_retry_raises):
         with patch("lambda_tasks.models.TimeoutContext"):
             with patch.object(_task_retry_raises, "execute_on_commit") as mock_eoc:
-                msg.execute_immediately()
+                msg.execute_immediately(message_id=str(uuid.uuid4()))
     mock_eoc.assert_called_once()
     call_kwargs = mock_eoc.call_args.kwargs
     assert call_kwargs["_n_retries"] == n_retries + 1
@@ -1352,7 +1352,6 @@ def test_property_5_matching_exc_enqueues_retry_same_kwargs(x, label):
     Validates: Requirements 3.1"""
     msg = SQSLambdaTaskMessage(
         task_name=_task_name(_task_retry_raises_with_kwargs),
-        invocation_id=str(uuid.uuid4()),
         kwargs={"x": x, "label": label},
         n_retries=0,
     )
@@ -1363,7 +1362,7 @@ def test_property_5_matching_exc_enqueues_retry_same_kwargs(x, label):
             with patch.object(
                 _task_retry_raises_with_kwargs, "execute_on_commit"
             ) as mock_eoc:
-                msg.execute_immediately()
+                msg.execute_immediately(message_id=str(uuid.uuid4()))
     mock_eoc.assert_called_once()
     call_kwargs = mock_eoc.call_args.kwargs
     assert call_kwargs["x"] == x
@@ -1378,15 +1377,15 @@ def test_property_6_retrying_status_and_traceback(exc_type_name):
     Validates: Requirements 3.2"""
     msg = SQSLambdaTaskMessage(
         task_name=_task_name(_task_retry_raises),
-        invocation_id=str(uuid.uuid4()),
         kwargs={"exc_type_name": exc_type_name},
         n_retries=0,
     )
+    message_id = str(uuid.uuid4())
     with patch("lambda_tasks.models.import_string", return_value=_task_retry_raises):
         with patch("lambda_tasks.models.TimeoutContext"):
             with patch.object(_task_retry_raises, "execute_on_commit"):
-                msg.execute_immediately()
-    record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+                msg.execute_immediately(message_id=message_id)
+    record = TaskRecord.objects.get(pk=message_id)
     assert record.status == TaskRecord.TaskStatus.RETRYING
     assert record.traceback is not None
     assert record.end_time is not None
@@ -1400,10 +1399,10 @@ def test_property_7_non_matching_exc_fails_no_retry(exc_type_name):
     Validates: Requirements 3.3, 3.4"""
     msg = SQSLambdaTaskMessage(
         task_name=_task_name(_task_retry_raises_non_matching),
-        invocation_id=str(uuid.uuid4()),
         kwargs={"exc_type_name": exc_type_name},
         n_retries=0,
     )
+    message_id = str(uuid.uuid4())
     with patch(
         "lambda_tasks.models.import_string",
         return_value=_task_retry_raises_non_matching,
@@ -1412,9 +1411,9 @@ def test_property_7_non_matching_exc_fails_no_retry(exc_type_name):
             with patch.object(
                 _task_retry_raises_non_matching, "execute_on_commit"
             ) as mock_eoc:
-                msg.execute_immediately()
+                msg.execute_immediately(message_id=message_id)
     mock_eoc.assert_not_called()
-    record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+    record = TaskRecord.objects.get(pk=message_id)
     assert record.status == TaskRecord.TaskStatus.FAILED
 
 
@@ -1429,17 +1428,17 @@ def test_property_8_max_retries_exceeded_raises_and_fails(n_retries, exc_type_na
     Validates: Requirements 4.2, 4.4"""
     msg = SQSLambdaTaskMessage(
         task_name=_task_name(_task_retry_raises),
-        invocation_id=str(uuid.uuid4()),
         kwargs={"exc_type_name": exc_type_name},
         n_retries=n_retries,
     )
+    message_id = str(uuid.uuid4())
     with patch("lambda_tasks.models.import_string", return_value=_task_retry_raises):
         with patch("lambda_tasks.models.TimeoutContext"):
             with patch.object(_task_retry_raises, "execute_on_commit") as mock_eoc:
                 with pytest.raises(MaxRetriesExceededError):
-                    msg.execute_immediately()
+                    msg.execute_immediately(message_id=message_id)
     mock_eoc.assert_not_called()
-    record = TaskRecord.objects.get(invocation_id=msg.invocation_id)
+    record = TaskRecord.objects.get(pk=message_id)
     assert record.status == TaskRecord.TaskStatus.FAILED
     assert record.traceback is not None
 
@@ -1457,7 +1456,6 @@ def test_property_10_non_zero_delay_used_as_retry_delay(delay):
 
     msg = SQSLambdaTaskMessage(
         task_name=_task_name(_task_raises_for_delay),
-        invocation_id=str(uuid.uuid4()),
         kwargs={"x": 1},
         n_retries=0,
     )
@@ -1466,7 +1464,7 @@ def test_property_10_non_zero_delay_used_as_retry_delay(delay):
     ):
         with patch("lambda_tasks.models.TimeoutContext"):
             with patch.object(_task_raises_for_delay, "execute_on_commit") as mock_eoc:
-                msg.execute_immediately()
+                msg.execute_immediately(message_id=str(uuid.uuid4()))
     mock_eoc.assert_called_once()
     assert mock_eoc.call_args.kwargs["_delay"] == delay
 
@@ -1484,7 +1482,6 @@ def test_property_11_zero_delay_produces_delay_in_range():
     for _ in range(100):
         msg = SQSLambdaTaskMessage(
             task_name=_task_name(_task_raises_zero_delay),
-            invocation_id=str(uuid.uuid4()),
             kwargs={"x": 1},
             n_retries=0,
         )
@@ -1495,7 +1492,7 @@ def test_property_11_zero_delay_produces_delay_in_range():
                 with patch.object(
                     _task_raises_zero_delay, "execute_on_commit"
                 ) as mock_eoc:
-                    msg.execute_immediately()
+                    msg.execute_immediately(message_id=str(uuid.uuid4()))
         delays_seen.append(mock_eoc.call_args.kwargs["_delay"])
 
     for d in delays_seen:

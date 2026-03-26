@@ -85,10 +85,7 @@ if conf.EAGER:
 
   message = SQSLambdaTaskMessage(
     task_name=task_name,
-    invocation_id=str(uuid.uuid4()),
     kwargs=task_kwargs,
-    soft_timeout=soft_timeout,
-    hard_timeout=hard_timeout,
   )
   execute_task(message=message)
   return

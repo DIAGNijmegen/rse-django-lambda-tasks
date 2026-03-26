@@ -180,7 +180,6 @@ payload = send_welcome_email.serialize(user_id=42, template="welcome")
 # {
 #   "message": {
 #     "task_name": "myapp.tasks.send_welcome_email",
-#     "invocation_id": "<uuid4>",
 #     "kwargs": {"user_id": 42, "template": "welcome"}
 #   },
 #   "delay": 0,
@@ -198,8 +197,6 @@ from lambda_tasks.models import SQSLambdaTask
 task = SQSLambdaTask.model_validate(payload)
 task.execute_on_commit()
 ```
-
-> **Note:** `serialize()` generates a fresh `invocation_id` on every call. Capture the result once if you need a stable reference to a specific invocation.
 
 ---
 
@@ -265,7 +262,7 @@ TaskRecord.objects.all()
 TaskRecord.objects.filter(status=TaskRecord.TaskStatus.FAILED)
 
 # Look up a specific invocation
-TaskRecord.objects.get(invocation_id="<uuid>")
+TaskRecord.objects.get(pk="<uuid>")
 ```
 
 ### `TaskRecord` fields
@@ -273,7 +270,6 @@ TaskRecord.objects.get(invocation_id="<uuid>")
 | Field | Type | Description |
 |---|---|---|
 | `task_name` | `str` | Fully-qualified function name (e.g. `myapp.tasks.send_welcome_email`). |
-| `invocation_id` | `UUID` | Unique ID generated at enqueue time. |
 | `kwargs` | `dict` | Serialized task arguments. |
 | `status` | `str` | One of `RUNNING`, `SUCCESS`, `FAILED`. |
 | `start_time` | `datetime \| None` | When the worker began executing the task. |
@@ -285,7 +281,7 @@ TaskRecord.objects.get(invocation_id="<uuid>")
 
 ## Logging
 
-Import `task_logger` to emit log records that are automatically prefixed with the active `invocation_id`. This makes it straightforward to filter all logs for a specific task invocation in CloudWatch Logs Insights.
+Import `task_logger` to emit log records that are automatically prefixed with the active `message_id`. This makes it straightforward to filter all logs for a specific task invocation in CloudWatch Logs Insights.
 
 ```python
 from lambda_tasks.logging import task_logger
@@ -298,9 +294,9 @@ def send_welcome_email(*, user_id: int, template: str) -> str:
     return "sent"
 ```
 
-`task_logger` is a `LoggerAdapter` wrapping the `lambda_tasks.task` logger. `SQSLambdaTaskMessage.execute_immediately()` sets the `invocation_id` before each task runs and clears it afterwards — you don't need to manage it yourself.
+`task_logger` is a `LoggerAdapter` wrapping the `lambda_tasks.task` logger. `SQSLambdaTaskMessage.execute_immediately()` sets the `message_id` before each task runs and clears it afterwards — you don't need to manage it yourself.
 
-Using your own `logging.getLogger(__name__)` is fine too; those records just won't carry the `invocation_id` prefix.
+Using your own `logging.getLogger(__name__)` is fine too; those records just won't carry the `message_id` prefix.
 
 To filter by invocation in CloudWatch Logs Insights:
 

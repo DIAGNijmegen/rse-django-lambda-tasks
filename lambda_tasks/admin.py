@@ -10,6 +10,7 @@ from lambda_tasks.models import TaskRecord
 @admin.register(TaskRecord)
 class TaskRecordAdmin(admin.ModelAdmin):
     list_display = (
+        "pk",
         "task_name",
         "status",
         "start_time",
@@ -20,7 +21,7 @@ class TaskRecordAdmin(admin.ModelAdmin):
     )
     list_filter = ("status", "task_name")
     date_hierarchy = "start_time"
-    search_fields = ("invocation_id", "kwargs")
+    search_fields = ("pk", "kwargs")
 
     def get_queryset(self, request: HttpRequest) -> QuerySet:
         return (

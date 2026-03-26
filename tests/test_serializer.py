@@ -21,7 +21,6 @@ def _serialize(*, task_name: str, kwargs: dict) -> str:
     """Build a SQSLambdaTaskMessage and return its JSON string, as the enqueuer does."""
     return SQSLambdaTaskMessage(
         task_name=task_name,
-        invocation_id=str(uuid.uuid4()),
         kwargs=kwargs,
     ).model_dump_json()
 
@@ -39,19 +38,6 @@ class TestSerialize:
     def test_task_name_present_in_output(self):
         result = _serialize(task_name="myapp.tasks.send_email", kwargs={"user_id": 42})
         assert json.loads(result)["task_name"] == "myapp.tasks.send_email"
-
-    def test_invocation_id_is_valid_uuid4(self):
-        result = _serialize(task_name="myapp.tasks.send_email", kwargs={})
-        assert uuid.UUID(json.loads(result)["invocation_id"]).version == 4
-
-    def test_two_calls_produce_different_invocation_ids(self):
-        id1 = json.loads(_serialize(task_name="myapp.tasks.send_email", kwargs={}))[
-            "invocation_id"
-        ]
-        id2 = json.loads(_serialize(task_name="myapp.tasks.send_email", kwargs={}))[
-            "invocation_id"
-        ]
-        assert id1 != id2
 
     def test_kwargs_preserved_in_output(self):
         kwargs = {"user_id": 99, "subject": "hello"}
@@ -83,18 +69,9 @@ class TestDeserialize:
             SQSLambdaTaskMessage.model_validate_json("not valid json at all {{{")
 
     def test_missing_required_field_raises_validation_error(self):
-        body = json.dumps({"invocation_id": str(uuid.uuid4()), "kwargs": {}})
+        body = json.dumps({"kwargs": {}})
         with pytest.raises(ValidationError):
             SQSLambdaTaskMessage.model_validate_json(body)
-
-    def test_invocation_id_preserved_on_round_trip(self):
-        body = _serialize(task_name="myapp.tasks.process", kwargs={})
-        assert (
-            uuid.UUID(
-                SQSLambdaTaskMessage.model_validate_json(body).invocation_id
-            ).version
-            == 4
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -118,27 +95,6 @@ def test_task_name_always_present_in_output(task_name):
     assert SQSLambdaTaskMessage.model_validate_json(body).task_name == task_name
 
 
-@given(st.integers())
-@settings(max_examples=200)
-def test_invocation_id_is_always_uuid4(_seed):
-    """invocation_id is always a valid UUID4."""
-    body = _serialize(task_name="myapp.tasks.example", kwargs={})
-    assert uuid.UUID(json.loads(body)["invocation_id"]).version == 4
-
-
-@given(st.integers())
-@settings(max_examples=100)
-def test_two_calls_always_produce_different_invocation_ids(_seed):
-    """Two separate serializations always produce different invocation_ids."""
-    id1 = json.loads(_serialize(task_name="myapp.tasks.example", kwargs={}))[
-        "invocation_id"
-    ]
-    id2 = json.loads(_serialize(task_name="myapp.tasks.example", kwargs={}))[
-        "invocation_id"
-    ]
-    assert id1 != id2
-
-
 class TypedKwargs(BaseModel):
     count: int
 
@@ -158,7 +114,6 @@ def test_type_invalid_kwargs_raise_validation_error(bad_value):
         message=st.builds(
             SQSLambdaTaskMessage,
             task_name=st.from_regex(r"[a-z]+\.[a-z]+", fullmatch=True),
-            invocation_id=st.uuids().map(str),
             kwargs=st.fixed_dictionaries({}),
         ),
         delay=st.integers(min_value=0, max_value=900),
@@ -174,7 +129,6 @@ def test_deferred_task_message_round_trip(m):
 _VALID_DEFERRED_BASE = {
     "message": {
         "task_name": "myapp.tasks.foo",
-        "invocation_id": "some-uuid",
         "kwargs": {},
     },
     "delay": 0,

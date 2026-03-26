@@ -2,6 +2,7 @@
 
 Validates: Requirements 7.2, 7.3
 """
+import uuid
 
 import pytest
 
@@ -183,7 +184,6 @@ def test_property_14_timeout_resolution_precedence(
 
     msg = SQSLambdaTaskMessage(
         task_name=f"{_noop.__module__}.{_noop.__qualname__}",
-        invocation_id=str(_uuid.uuid4()),
         kwargs={"x": 1},
     )
 
@@ -212,7 +212,7 @@ def test_property_14_timeout_resolution_precedence(
         mock_conf.DEFAULT_SOFT_TIMEOUT = glob_soft
         mock_conf.DEFAULT_HARD_TIMEOUT = glob_hard
         mock_settings_cls.return_value = mock_conf
-        msg.execute_immediately()
+        msg.execute_immediately(message_id=str(uuid.uuid4()))
 
     assert captured.get("soft") == expected_soft, (
         f"Expected soft={expected_soft}, got {captured.get('soft')} "

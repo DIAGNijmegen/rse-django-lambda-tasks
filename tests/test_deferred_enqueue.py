@@ -58,13 +58,6 @@ def test_to_json_task_name_matches_module_qualname():
     assert result["message"]["task_name"] == expected
 
 
-def test_to_json_invocation_id_is_valid_uuid4():
-    """result['message']['invocation_id'] is a valid UUID4 string."""
-    result = _wrapper.serialize(x=1)
-    parsed = uuid.UUID(result["message"]["invocation_id"])
-    assert parsed.version == 4
-
-
 def test_to_json_raises_validation_error_for_wrong_type_kwargs():
     """to_json(x='not_an_int') raises ValidationError when x is annotated as int."""
     with pytest.raises(ValidationError):
@@ -95,7 +88,6 @@ _valid_deferred_dict_st = st.fixed_dictionaries(
         "message": st.fixed_dictionaries(
             {
                 "task_name": st.just("tests.test_deferred_enqueue._task"),
-                "invocation_id": st.uuids().map(str),
                 "kwargs": st.fixed_dictionaries({"x": st.integers()}),
             }
         ),
@@ -120,7 +112,6 @@ def test_p1_to_json_structural_invariant(x: int) -> None:
     result = _wrapper.serialize(x=x)
     SQSLambdaTask.model_validate(result)
     assert result["message"]["task_name"] == f"{_task.__module__}.{_task.__qualname__}"
-    assert uuid.UUID(result["message"]["invocation_id"]).version == 4
     assert result["message"]["kwargs"] == {"x": x}
     assert result["delay"] == 0
     assert result["queue"] == "default"

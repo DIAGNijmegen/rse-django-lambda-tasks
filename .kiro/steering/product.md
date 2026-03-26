@@ -64,7 +64,7 @@ def sync_user(*, user_id: int) -> None:
 
 ## retry_on
 
-Pass a tuple of exception types to `retry_on` on `@lambda_task`. If the task raises an instance of any of those types (or a subclass), the executor automatically re-enqueues the task via `execute_on_commit` with the same kwargs, a fresh `invocation_id`, and an incremented `_n_retries` counter.
+Pass a tuple of exception types to `retry_on` on `@lambda_task`. If the task raises an instance of any of those types (or a subclass), the executor automatically re-enqueues the task via `execute_on_commit` with the same kwargs, and an incremented `_n_retries` counter.
 
 - `TaskRecord.status` is set to `RETRYING` and the traceback is recorded
 - The retry is a new invocation — the current record is terminal at `RETRYING`
@@ -98,7 +98,7 @@ class SQSLambdaTaskMessage(BaseModel):
 ## Execution
 
 `SQSLambdaTaskMessage.execute_immediately()` in `models.py`:
-1. Checks for an existing `TaskRecord` with the same `invocation_id` via `get_or_create`
+1. Checks for an existing `TaskRecord` with the same `pk` via `get_or_create`
 2. If a record already exists (any status), logs and returns immediately — duplicate deliveries are silently skipped
 3. Resolves timeouts: decorator default → settings defaults (soft=270s, hard=300s)
 4. Runs task inside `transaction.atomic()` + `TimeoutContext`
@@ -141,7 +141,7 @@ Behaviour:
 
 ## TaskRecord Model
 
-Fields: `task_name`, `invocation_id` (unique UUID), `kwargs`, `status`, `start_time`, `end_time`, `result`, `traceback`
+Fields: `task_name`, `pk` (unique UUID), `kwargs`, `status`, `start_time`, `end_time`, `result`, `traceback`
 
 Statuses: `RUNNING`, `SUCCESS`, `FAILED`, `RETRYING`
 
@@ -167,7 +167,7 @@ Set `LAMBDA_TASKS_EAGER = True` to run tasks synchronously in-process (no SQS). 
 
 ## Logging
 
-Import `task_logger` to emit log records that are automatically prefixed with the active `invocation_id`:
+Import `task_logger` to emit log records that are automatically prefixed with the active `message_id`:
 
 ```python
 from lambda_tasks.logging import task_logger
@@ -179,7 +179,7 @@ def my_task(*, user_id: int) -> None:
     # → "[abc-123] processing user 42"
 ```
 
-`task_logger` is a `LoggerAdapter` wrapping the `lambda_tasks.task` logger. The executor sets the `invocation_id` before each task runs and clears it in a `finally` block. Using your own `logging.getLogger(__name__)` is fine — those records just won't carry the prefix.
+`task_logger` is a `LoggerAdapter` wrapping the `lambda_tasks.task` logger. The executor sets the `message_id` before each task runs and clears it in a `finally` block. Using your own `logging.getLogger(__name__)` is fine — those records just won't carry the prefix.
 
 ## Conventions
 

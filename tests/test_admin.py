@@ -10,6 +10,7 @@ def test_task_record_registered_in_admin():
 
 def test_task_record_admin_list_display():
     assert admin.site._registry[TaskRecord].list_display == (
+        "pk",
         "task_name",
         "status",
         "start_time",

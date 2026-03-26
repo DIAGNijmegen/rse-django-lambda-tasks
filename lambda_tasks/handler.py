@@ -40,7 +40,7 @@ def handler(*, event: dict, context: object) -> dict:
         try:
             SQSLambdaTaskMessage.model_validate_json(
                 record["body"]
-            ).execute_immediately()
+            ).execute_immediately(message_id=record["messageId"])
         except Exception:
             logger.error(
                 "Failed to process SQS record %s",

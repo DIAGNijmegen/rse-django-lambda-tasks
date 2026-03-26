@@ -2,6 +2,7 @@
 
 import random
 import traceback
+import uuid
 
 import boto3
 from django.core.exceptions import ImproperlyConfigured
@@ -33,8 +34,8 @@ class TaskStatus(models.TextChoices):
 class TaskRecord(models.Model):
     TaskStatus = TaskStatus
 
+    id = models.UUIDField(primary_key=True, editable=False)
     task_name = models.CharField(max_length=255, editable=False)
-    invocation_id = models.UUIDField(unique=True, editable=False)
     kwargs = models.JSONField(editable=False)
     n_retries = models.PositiveSmallIntegerField(editable=False)
     status = models.CharField(
@@ -55,7 +56,6 @@ class TaskRecord(models.Model):
         ordering = ["-start_time"]
         indexes = [
             models.Index(fields=["task_name"]),
-            models.Index(fields=["invocation_id"]),
             models.Index(fields=["status"]),
             models.Index(fields=["-start_time"]),
         ]
@@ -71,18 +71,17 @@ class SQSLambdaTaskMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     task_name: str
-    invocation_id: str
     kwargs: dict
     n_retries: int = Field(default=0, ge=0)
 
-    def execute_immediately(self) -> None:
+    def execute_immediately(self, *, message_id: str) -> None:
         """Execute a background task described.
 
         Creates a TaskRecord, resolves timeouts, validates configuration,
         runs the task inside an atomic block with timeout enforcement, and
         persists the outcome.
         """
-        task_logger.invocation_id = self.invocation_id
+        task_logger.message_id = message_id
 
         try:
             task_logger.info(f"Received {self.task_name}")
@@ -104,7 +103,7 @@ class SQSLambdaTaskMessage(BaseModel):
 
             record, created = (
                 TaskRecord.objects.get_or_create(  # ty: ignore[unresolved-attribute]
-                    invocation_id=self.invocation_id,
+                    pk=message_id,
                     defaults={
                         "task_name": self.task_name,
                         "kwargs": self.kwargs,
@@ -200,7 +199,7 @@ class SQSLambdaTaskMessage(BaseModel):
                 )
 
         finally:
-            task_logger.invocation_id = None
+            task_logger.message_id = None
 
 
 class SQSLambdaTask(BaseModel):
@@ -224,7 +223,7 @@ class SQSLambdaTask(BaseModel):
         conf = LambdaTasksSettings()
 
         if conf.EAGER:
-            self.message.execute_immediately()
+            self.message.execute_immediately(message_id=str(uuid.uuid4()))
         else:
             try:
                 queue_url = conf.QUEUES[self.queue]

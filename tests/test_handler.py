@@ -37,7 +37,6 @@ def _valid_body(task_name: str = "my_module.my_task", **kwargs) -> str:
     return json.dumps(
         {
             "task_name": task_name,
-            "invocation_id": str(uuid.uuid4()),
             "kwargs": kwargs,
         }
     )
@@ -78,8 +77,7 @@ class TestHandlerAllSucceed:
 class TestHandlerPartialFailure:
     def test_one_record_fails_only_that_id_in_failures(self):
         """One record fails → only that messageId in batchItemFailures."""
-        fail_body = _valid_body()
-        ok_body = _valid_body()
+        ok_body, fail_body = [f"{_valid_body()}-{i}" for i in range(2)]
         records = [
             _make_record("msg-ok", ok_body),
             _make_record("msg-fail", fail_body),
@@ -146,9 +144,7 @@ class TestHandlerIndependentProcessing:
     def test_failure_does_not_prevent_subsequent_records(self):
         """A failure in one record does not prevent processing of subsequent records."""
         processed = []
-        fail_body = _valid_body()
-        before_body = _valid_body()
-        after_body = _valid_body()
+        before_body, fail_body, after_body = [f"{_valid_body()}-{i}" for i in range(3)]
 
         records = [
             _make_record("msg-before", before_body),
@@ -169,7 +165,7 @@ class TestHandlerIndependentProcessing:
                 msg.execute_immediately.side_effect = RuntimeError("boom")
             else:
 
-                def _execute(mid=msg_id):
+                def _execute(mid=msg_id, **kwargs):
                     processed.append(mid)
 
                 msg.execute_immediately.side_effect = _execute
@@ -212,7 +208,7 @@ class TestHandlerIndependentProcessing:
 @settings(max_examples=100)
 def test_property_11_batch_records_processed_independently(flags):
     """Property 11: Every record is attempted; batchItemFailures contains exactly the failed IDs."""
-    bodies = [_valid_body() for _ in range(len(flags))]
+    bodies = [f"{_valid_body()}-{i}" for i in range(len(flags))]
     records = [_make_record(f"msg-{i}", bodies[i]) for i in range(len(flags))]
     expected_failures = {f"msg-{i}" for i, ok in enumerate(flags) if not ok}
     attempted_bodies = []
@@ -280,7 +276,6 @@ def test_property_4_django_setup_before_execute_task(monkeypatch):
     body = json.dumps(
         {
             "task_name": "some.task",
-            "invocation_id": str(uuid.uuid4()),
             "kwargs": {},
         }
     )

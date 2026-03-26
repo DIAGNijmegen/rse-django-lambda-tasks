@@ -153,7 +153,6 @@ class LambdaTaskWrapper:
 
         message = SQSLambdaTaskMessage(
             task_name=f"{self._func.__module__}.{self._func.__qualname__}",
-            invocation_id=str(uuid.uuid4()),
             kwargs=dict(kwargs),
             n_retries=n_retries,
         )
@@ -170,7 +169,7 @@ class LambdaTaskWrapper:
         Accepts task kwargs plus reserved override kwargs:
             _delay: int
 
-        Returns a dict matching SQSLambdaTaskMessage schema with a stable invocation_id.
+        Returns a dict matching SQSLambdaTaskMessage schema
 
         Raises:
             pydantic.ValidationError: if kwargs fail the task's declared type annotations.
