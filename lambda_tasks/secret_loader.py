@@ -1,14 +1,14 @@
 """
 Resolves environment variables that reference AWS Secrets Manager ARNs.
 
-Any env var prefixed with ``AWS_SECRETS_MANAGER_`` is treated as a pointer
+Any env var prefixed with ``LAMBDA_TASKS_SECRET_`` is treated as a pointer
 to a secret value.  The unprefixed name is the target env var to populate.
 
 Required value format
 ---------------------
 Every reference must follow the full dynamic reference syntax::
 
-    AWS_SECRETS_MANAGER_DJANGO_ADMIN_URL=arn:aws:secretsmanager:eu-west-1:123:secret:my-secret:DJANGO_ADMIN_URL:AWSCURRENT:v1
+    LAMBDA_TASKS_SECRET_DJANGO_ADMIN_URL=arn:aws:secretsmanager:eu-west-1:123:secret:my-secret:DJANGO_ADMIN_URL:AWSCURRENT:v1
 
 That is: ``<arn>:<json-key>:<version-stage>:<version-id>``
 
@@ -16,7 +16,7 @@ All four suffix segments must be present and non-empty.
 A malformed reference raises ``ValueError`` immediately so the Lambda
 container fails at cold start rather than silently misconfiguring Django.
 
-It is a configuration error to set both ``AWS_SECRETS_MANAGER_FOO`` and
+It is a configuration error to set both ``LAMBDA_TASKS_SECRET_FOO`` and
 ``FOO`` — use one or the other.  Having both raises ``ValueError`` at cold
 start so the misconfiguration is caught immediately.
 
@@ -35,7 +35,7 @@ import boto3
 
 logger = logging.getLogger(__name__)
 
-_PREFIX = "AWS_SECRETS_MANAGER_"
+_PREFIX = "LAMBDA_TASKS_SECRET_"
 
 # Module-level cache: (arn, version_stage, version_id) → raw secret string.
 # Populated on first call; reused for the lifetime of the Lambda container.
@@ -128,14 +128,14 @@ def _fetch_secret(*, client: object, ref: _SecretReference) -> dict[str, str]:
 
 
 def resolve_secrets_into_env() -> None:
-    """Scan env vars for ``AWS_SECRETS_MANAGER_*`` references and resolve them.
+    """Scan env vars for ``LAMBDA_TASKS_SECRET_*`` references and resolve them.
 
     For each matching env var the resolved value is written back into
     ``os.environ`` under the unprefixed name.
 
     Raises ``ValueError`` at cold start if:
     - A reference is malformed (wrong segment count, any empty field)
-    - The target env var is already set — use ``AWS_SECRETS_MANAGER_FOO`` or
+    - The target env var is already set — use ``LAMBDA_TASKS_SECRET_FOO`` or
       ``FOO``, not both
 
     This function is idempotent — calling it multiple times is safe and cheap
@@ -157,7 +157,7 @@ def resolve_secrets_into_env() -> None:
     if conflicts:
         raise ValueError(
             "The following environment variables are set both directly and via "
-            f"AWS_SECRETS_MANAGER_*: {', '.join(sorted(conflicts))}. "
+            f"LAMBDA_TASKS_SECRET_*: {', '.join(sorted(conflicts))}. "
             "Use one or the other, not both."
         )
 

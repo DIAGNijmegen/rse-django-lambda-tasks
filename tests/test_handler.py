@@ -46,7 +46,7 @@ def _valid_body(task_name: str = "my_module.my_task", **kwargs) -> str:
 def _patch_model_validate(side_effect):
     """Patch SQSLambdaTaskMessage.model_validate_json in the handler module."""
     return patch(
-        "lambda_tasks.handler.SQSLambdaTaskMessage.model_validate_json",
+        "lambda_tasks.models.SQSLambdaTaskMessage.model_validate_json",
         side_effect=side_effect,
     )
 
@@ -252,7 +252,6 @@ def test_property_11_batch_records_processed_independently(flags):
 def test_property_4_django_setup_before_execute_task(monkeypatch):
     import importlib
 
-    import django
     import django.apps
 
     import lambda_tasks.handler as handler_module
@@ -272,7 +271,7 @@ def test_property_4_django_setup_before_execute_task(monkeypatch):
         return MagicMock()
 
     monkeypatch.setattr(
-        "lambda_tasks.handler.SQSLambdaTaskMessage.model_validate_json",
+        "lambda_tasks.models.SQSLambdaTaskMessage.model_validate_json",
         spy_model_validate,
     )
 

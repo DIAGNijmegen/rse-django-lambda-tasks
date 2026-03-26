@@ -393,15 +393,15 @@ Ensure the Lambda execution environment has `DJANGO_SETTINGS_MODULE` set and tha
 
 The Lambda handler supports loading secret values from AWS Secrets Manager into the environment before Django starts. This lets your Django settings file read from `os.environ` as normal while keeping secrets out of plaintext environment variables.
 
-Set any env var with the prefix `AWS_SECRETS_MANAGER_` to a full Secrets Manager dynamic reference. The unprefixed name becomes the target env var:
+Set any env var with the prefix `LAMBDA_TASKS_SECRET_` to a full Secrets Manager dynamic reference. The unprefixed name becomes the target env var:
 
 ```
-AWS_SECRETS_MANAGER_DATABASE_URL=arn:aws:secretsmanager:eu-west-1:123456789012:secret:myapp/prod:DATABASE_URL:AWSCURRENT:v1
+LAMBDA_TASKS_SECRET_DATABASE_URL=arn:aws:secretsmanager:eu-west-1:123456789012:secret:myapp/prod:DATABASE_URL:AWSCURRENT:v1
 ```
 
 At cold start, before `django.setup()` is called, the handler calls `resolve_secrets_into_env()` which:
 
-1. Scans all env vars for the `AWS_SECRETS_MANAGER_` prefix
+1. Scans all env vars for the `LAMBDA_TASKS_SECRET_` prefix
 2. Validates every reference — malformed references raise immediately so the container fails to start rather than misconfiguring Django silently
 3. Groups references by `(ARN, version-stage, version-id)` and makes one `GetSecretValue` call per unique combination
 4. Extracts the named JSON key from the secret and writes it into `os.environ`
@@ -425,8 +425,8 @@ arn:aws:secretsmanager:eu-west-1:123456789012:secret:myapp/prod:DATABASE_URL:AWS
 Multiple env vars can reference different keys from the same secret — only one `GetSecretValue` call is made for that `(ARN, version-stage, version-id)` combination:
 
 ```
-AWS_SECRETS_MANAGER_DATABASE_URL=arn:...:myapp/prod:DATABASE_URL:AWSCURRENT:v1
-AWS_SECRETS_MANAGER_SECRET_KEY=arn:...:myapp/prod:SECRET_KEY:AWSCURRENT:v1
+LAMBDA_TASKS_SECRET_DATABASE_URL=arn:...:myapp/prod:DATABASE_URL:AWSCURRENT:v1
+LAMBDA_TASKS_SECRET_SECRET_KEY=arn:...:myapp/prod:SECRET_KEY:AWSCURRENT:v1
 ```
 
 #### Validation errors
@@ -435,7 +435,7 @@ The following all raise `ValueError` at cold start, preventing the Lambda contai
 
 - Wrong number of colon-separated segments (must be exactly 10)
 - Empty `json-key`, `version-stage`, or `version-id`
-- Both `AWS_SECRETS_MANAGER_FOO` and `FOO` are set — use one or the other
+- Both `LAMBDA_TASKS_SECRET_FOO` and `FOO` are set — use one or the other
 - The named JSON key does not exist in the fetched secret
 - The secret value is not valid JSON
 

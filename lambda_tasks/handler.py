@@ -10,16 +10,15 @@ import logging
 import os
 
 import django
-from django.apps import apps as django_apps
+from django.apps import apps
 
-from lambda_tasks.models import SQSLambdaTaskMessage
 from lambda_tasks.secret_loader import resolve_secrets_into_env
 
 # Cold-start Django setup — runs once per Lambda container.
 # Secrets are resolved first so Django settings can reference the populated
-# env vars.  resolve_secrets_into_env() is idempotent and caches fetched
+# env vars. resolve_secrets_into_env() is idempotent and caches fetched
 # secrets in-process, so subsequent invocations pay no extra cost.
-if os.environ.get("DJANGO_SETTINGS_MODULE") and not django_apps.ready:
+if os.environ.get("DJANGO_SETTINGS_MODULE") and not apps.ready:
     resolve_secrets_into_env()
     django.setup()
 
@@ -32,6 +31,9 @@ def handler(*, event: dict, context: object) -> dict:
 
     Returns a partial-batch failure report so AWS only re-drives failed records.
     """
+    # Local import due to AppRegistryNotReady
+    from lambda_tasks.models import SQSLambdaTaskMessage
+
     batch_item_failures: list[dict] = []
 
     for record in event["Records"]:

@@ -121,13 +121,13 @@ class SQSLambdaTaskMessage(BaseModel):
 
 `resolve_secrets_into_env()` in `secret_loader.py` runs once at Lambda cold start, before `django.setup()`.
 
-Any env var prefixed `AWS_SECRETS_MANAGER_` is treated as a Secrets Manager reference. The unprefixed name is the target env var.
+Any env var prefixed `LAMBDA_TASKS_SECRET_` is treated as a Secrets Manager reference. The unprefixed name is the target env var.
 
 Required format: `<arn>:<json-key>:<version-stage>:<version-id>` (10 colon-separated segments, all fields non-empty).
 
 Behaviour:
 - All references are validated before any AWS call — malformed references raise `ValueError` immediately
-- Setting both `AWS_SECRETS_MANAGER_FOO` and `FOO` is a configuration error and raises `ValueError`
+- Setting both `LAMBDA_TASKS_SECRET_FOO` and `FOO` is a configuration error and raises `ValueError`
 - Calls are batched by `(ARN, version-stage, version-id)` — one `GetSecretValue` per unique combination
 - Fetched secrets are cached in-process; warm invocations pay no extra cost
 
