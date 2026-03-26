@@ -7,27 +7,58 @@ class Migration(migrations.Migration):
 
     initial = True
 
-    dependencies = [
-    ]
+    dependencies = []
 
     operations = [
         migrations.CreateModel(
-            name='TaskRecord',
+            name="TaskRecord",
             fields=[
-                ('id', models.UUIDField(editable=False, primary_key=True, serialize=False)),
-                ('task_name', models.CharField(editable=False, max_length=255)),
-                ('kwargs', models.JSONField(editable=False)),
-                ('n_retries', models.PositiveSmallIntegerField(editable=False)),
-                ('status', models.CharField(choices=[('RUNNING', 'Running'), ('SUCCESS', 'Success'), ('FAILED', 'Failed'), ('RETRYING', 'Retrying')], editable=False, max_length=10)),
-                ('start_time', models.DateTimeField(editable=False, null=True)),
-                ('end_time', models.DateTimeField(editable=False, null=True)),
-                ('result', models.JSONField(editable=False, null=True)),
-                ('traceback', models.TextField(editable=False, null=True)),
+                (
+                    "id",
+                    models.UUIDField(editable=False, primary_key=True, serialize=False),
+                ),
+                ("task_name", models.CharField(editable=False, max_length=255)),
+                ("kwargs", models.JSONField(editable=False)),
+                ("n_retries", models.PositiveSmallIntegerField(editable=False)),
+                (
+                    "status",
+                    models.CharField(
+                        choices=[
+                            ("RUNNING", "Running"),
+                            ("SUCCESS", "Success"),
+                            ("FAILED", "Failed"),
+                            ("RETRYING", "Retrying"),
+                        ],
+                        editable=False,
+                        max_length=10,
+                    ),
+                ),
+                ("start_time", models.DateTimeField(editable=False, null=True)),
+                ("end_time", models.DateTimeField(editable=False, null=True)),
+                ("result", models.JSONField(editable=False, null=True)),
+                ("traceback", models.TextField(editable=False, null=True)),
             ],
             options={
-                'ordering': ['-start_time'],
-                'indexes': [models.Index(fields=['task_name'], name='lambda_task_task_na_f00cb7_idx'), models.Index(fields=['status'], name='lambda_task_status_6901ee_idx'), models.Index(fields=['-start_time'], name='lambda_task_start_t_9caffc_idx')],
-                'constraints': [models.CheckConstraint(condition=models.Q(('status__in', ['RUNNING', 'SUCCESS', 'FAILED', 'RETRYING'])), name='taskrecord_status_valid')],
+                "ordering": ["-start_time"],
+                "indexes": [
+                    models.Index(
+                        fields=["task_name"], name="lambda_task_task_na_f00cb7_idx"
+                    ),
+                    models.Index(
+                        fields=["status"], name="lambda_task_status_6901ee_idx"
+                    ),
+                    models.Index(
+                        fields=["-start_time"], name="lambda_task_start_t_9caffc_idx"
+                    ),
+                ],
+                "constraints": [
+                    models.CheckConstraint(
+                        condition=models.Q(
+                            ("status__in", ["RUNNING", "SUCCESS", "FAILED", "RETRYING"])
+                        ),
+                        name="taskrecord_status_valid",
+                    )
+                ],
             },
         ),
     ]

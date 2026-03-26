@@ -77,7 +77,7 @@ class TestHandlerAllSucceed:
 class TestHandlerPartialFailure:
     def test_one_record_fails_only_that_id_in_failures(self):
         """One record fails → only that messageId in batchItemFailures."""
-        ok_body, fail_body = [f"{_valid_body()}-{i}" for i in range(2)]
+        ok_body, fail_body = (f"{_valid_body()}-{i}" for i in range(2))
         records = [
             _make_record("msg-ok", ok_body),
             _make_record("msg-fail", fail_body),
@@ -144,7 +144,7 @@ class TestHandlerIndependentProcessing:
     def test_failure_does_not_prevent_subsequent_records(self):
         """A failure in one record does not prevent processing of subsequent records."""
         processed = []
-        before_body, fail_body, after_body = [f"{_valid_body()}-{i}" for i in range(3)]
+        before_body, fail_body, after_body = (f"{_valid_body()}-{i}" for i in range(3))
 
         records = [
             _make_record("msg-before", before_body),
