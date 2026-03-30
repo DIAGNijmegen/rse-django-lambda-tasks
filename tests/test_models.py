@@ -11,9 +11,11 @@ Covers:
 """
 
 import uuid
+from datetime import datetime
 
 import pytest
 from django.db import IntegrityError
+from django.utils.timezone import now
 
 from lambda_tasks.decorators import lambda_task
 from lambda_tasks.models import SQSLambdaTaskMessage, TaskRecord
@@ -1498,3 +1500,27 @@ def test_property_11_zero_delay_produces_delay_in_range():
     for d in delays_seen:
         assert isinstance(d, int)
         assert 1 <= d <= 5
+
+
+@pytest.mark.django_db
+def test_task_takes_not_json_seralizable():
+
+    @lambda_task
+    def _task_takes_not_json_seralizable(*, x: datetime) -> None:
+        assert isinstance(x, datetime)
+
+    message_id = uuid.uuid4()
+    execution_time = now()
+
+    with patch(
+        "lambda_tasks.models.import_string",
+        return_value=_task_takes_not_json_seralizable,
+    ):
+        msg = SQSLambdaTaskMessage(
+            task_name=_task_name(_task_takes_not_json_seralizable),
+            kwargs={"x": execution_time},
+            n_retries=0,
+        ).execute_immediately(message_id=message_id)
+
+    record = TaskRecord.objects.get(pk=message_id)
+    assert record.kwargs == {"x": execution_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ")}
