@@ -3,6 +3,7 @@
 import random
 import traceback
 import uuid
+from typing import Any
 
 import boto3
 from django.core.exceptions import ImproperlyConfigured
@@ -10,7 +11,7 @@ from django.db import models, transaction
 from django.db.models import Q
 from django.utils.module_loading import import_string
 from django.utils.timezone import now
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from lambda_tasks.logging import task_logger
 from lambda_tasks.settings import LambdaTasksSettings
@@ -74,6 +75,10 @@ class SQSLambdaTaskMessage(BaseModel):
     kwargs: dict
     n_retries: int = Field(default=0, ge=0)
 
+    @classmethod
+    def _dump_python(cls, *, data: Any) -> Any:
+        return TypeAdapter(Any).dump_python(data, mode="json")
+
     def execute_immediately(self, *, message_id: str) -> None:
         """Execute a background task described.
 
@@ -106,7 +111,7 @@ class SQSLambdaTaskMessage(BaseModel):
                     pk=message_id,
                     defaults={
                         "task_name": self.task_name,
-                        "kwargs": self.kwargs,
+                        "kwargs": self._dump_python(data=self.kwargs),
                         "n_retries": self.n_retries,
                         "status": TaskRecord.TaskStatus.RUNNING,
                         "start_time": now(),
