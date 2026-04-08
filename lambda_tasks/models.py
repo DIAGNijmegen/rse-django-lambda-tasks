@@ -133,13 +133,10 @@ class SQSLambdaTaskMessage(BaseModel):
 
             if wrapper.singleton:
                 cache = caches[LambdaTasksSettings().SINGLETON_CACHE]
-                lock_key = f"lambda_tasks.singleton_lock.{self.task_name}"
-                lock_ctx: contextlib.AbstractContextManager = (
-                    cache.lock(  # ty: ignore[assignment]
-                        lock_key,
-                        blocking_timeout=0,
-                        timeout=hard_timeout,
-                    )
+                lock_ctx = cache.lock(
+                    f"lambda_tasks.singleton_lock.{self.task_name}",
+                    blocking_timeout=0,
+                    timeout=hard_timeout,
                 )
                 effective_retry_on = (LockError, *wrapper.retry_on)
             else:
