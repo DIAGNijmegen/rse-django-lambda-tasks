@@ -182,6 +182,12 @@ def my_task(*, user_id: int) -> None:
 
 `task_logger` is a `LoggerAdapter` wrapping the `lambda_tasks.task` logger. The executor sets the `message_id` before each task runs and clears it in a `finally` block. Using your own `logging.getLogger(__name__)` is fine — those records just won't carry the prefix.
 
+## Built-in Tasks
+
+`lambda_tasks.tasks` provides maintenance tasks that ship with the library:
+
+- `cleanup_task_records(*, retention_days: int = 7) -> int` — deletes `TaskRecord` rows whose `start_time` is strictly older than `retention_days`. Returns the number of deleted rows. Decorated with `@lambda_task` so it can be enqueued via `cleanup_task_records.execute_on_commit()` or called directly. Users are responsible for scheduling (e.g. EventBridge rule, cron, management command).
+
 ## Conventions
 
 - All task functions must use keyword-only arguments (enforced at decoration time)

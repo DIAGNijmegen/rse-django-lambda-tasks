@@ -437,6 +437,28 @@ The following all raise `ValueError` at cold start, preventing the Lambda contai
 
 ---
 
+## Built-in tasks
+
+### `cleanup_task_records`
+
+A maintenance task that deletes `TaskRecord` rows older than a given number of days. This is the equivalent of Celery's backend cleanup — without periodic pruning, the `TaskRecord` table will grow indefinitely.
+
+```python
+from lambda_tasks.tasks import cleanup_task_records
+
+# Delete records older than 7 days (default)
+cleanup_task_records.execute_on_commit()
+
+# Delete records older than 30 days
+cleanup_task_records.execute_on_commit(retention_days=30)
+```
+
+The task deletes all records whose `start_time` is strictly before `now() - retention_days`, regardless of status. It returns the number of deleted rows.
+
+Schedule it however suits your infrastructure — an EventBridge rule triggering a Lambda, a Django management command in a cron job, or a call from another task. The library does not impose a scheduling mechanism.
+
+---
+
 ## Direct (synchronous) invocation
 
 You can call a decorated task directly like a normal function — useful in tests or management commands where you want synchronous execution without going through SQS:

@@ -18,6 +18,7 @@ django-lambda-tasks/
 │   ├── models.py               # TaskRecord, SQSLambdaTaskMessage, SQSLambdaTask
 │   ├── settings.py             # LambdaTasksSettings (lazy Django settings reader)
 │   ├── secret_loader.py        # Resolves LAMBDA_TASKS_SECRET_* env vars at cold start
+│   ├── tasks.py                # Built-in maintenance tasks (cleanup_task_records)
 │   ├── timeouts.py             # TimeoutContext implementation
 │   └── migrations/             # Django migrations for TaskRecord
 ├── tests/                      # pytest test suite
@@ -43,6 +44,7 @@ django-lambda-tasks/
 - `logging.py` — `task_logger` singleton; `message_id` set/cleared around each task execution
 - `settings.py` — `LambdaTasksSettings` instantiated fresh per use (reads live Django settings)
 - `admin.py` — Django admin registration for `TaskRecord`
+- `tasks.py` — built-in maintenance tasks; `cleanup_task_records` deletes old `TaskRecord` rows
 
 ## Conventions
 
