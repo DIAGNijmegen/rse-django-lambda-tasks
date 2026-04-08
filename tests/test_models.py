@@ -921,30 +921,6 @@ def test_property_send_sqs_failure_propagates(settings, exc):
 
 
 @pytest.mark.django_db(transaction=True)
-@given(delay=st.integers(min_value=0, max_value=899))
-@hyp_settings(
-    max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture]
-)
-def test_property_on_commit_delay_embedded_in_sqs_message(settings, delay):
-    from django.db import transaction
-
-    from lambda_tasks.decorators import LambdaTaskWrapper
-
-    def _task(*, x: int = 0) -> None:
-        pass
-
-    settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
-    wrapper = LambdaTaskWrapper(_task)
-    with patch("lambda_tasks.models.boto3") as mock_b3:
-        mock_client = MagicMock()
-        mock_b3.client.return_value = mock_client
-        with transaction.atomic():
-            wrapper.execute_on_commit(x=1, _delay=delay)
-        mock_client.send_message.assert_called_once()
-        assert mock_client.send_message.call_args.kwargs["DelaySeconds"] == delay
-
-
-@pytest.mark.django_db(transaction=True)
 @given(msg=_deferred_msg_st)
 @hyp_settings(
     max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture]
@@ -1334,13 +1310,20 @@ def test_property_4_retry_increments_n_retries(n_retries, exc_type_name):
         kwargs={"exc_type_name": exc_type_name},
         n_retries=n_retries,
     )
+    captured_tasks: list[SQSLambdaTask] = []
+
+    def capturing_execute_on_commit(self: SQSLambdaTask) -> None:
+        captured_tasks.append(self)
+
     with patch("lambda_tasks.models.import_string", return_value=_task_retry_raises):
         with patch("lambda_tasks.models.TimeoutContext"):
-            with patch.object(_task_retry_raises, "execute_on_commit") as mock_eoc:
+            with patch.object(
+                SQSLambdaTask, "execute_on_commit", capturing_execute_on_commit
+            ):
                 msg.execute_immediately(message_id=str(uuid.uuid4()))
-    mock_eoc.assert_called_once()
-    call_kwargs = mock_eoc.call_args.kwargs
-    assert call_kwargs["_n_retries"] == n_retries + 1
+
+    assert len(captured_tasks) == 1
+    assert captured_tasks[0].message.n_retries == n_retries + 1
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1357,18 +1340,23 @@ def test_property_5_matching_exc_enqueues_retry_same_kwargs(x, label):
         kwargs={"x": x, "label": label},
         n_retries=0,
     )
+    captured_tasks: list[SQSLambdaTask] = []
+
+    def capturing_execute_on_commit(self: SQSLambdaTask) -> None:
+        captured_tasks.append(self)
+
     with patch(
         "lambda_tasks.models.import_string", return_value=_task_retry_raises_with_kwargs
     ):
         with patch("lambda_tasks.models.TimeoutContext"):
             with patch.object(
-                _task_retry_raises_with_kwargs, "execute_on_commit"
-            ) as mock_eoc:
+                SQSLambdaTask, "execute_on_commit", capturing_execute_on_commit
+            ):
                 msg.execute_immediately(message_id=str(uuid.uuid4()))
-    mock_eoc.assert_called_once()
-    call_kwargs = mock_eoc.call_args.kwargs
-    assert call_kwargs["x"] == x
-    assert call_kwargs["label"] == label
+
+    assert len(captured_tasks) == 1
+    assert captured_tasks[0].message.kwargs["x"] == x
+    assert captured_tasks[0].message.kwargs["label"] == label
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1385,7 +1373,7 @@ def test_property_6_retrying_status_and_traceback(exc_type_name):
     message_id = str(uuid.uuid4())
     with patch("lambda_tasks.models.import_string", return_value=_task_retry_raises):
         with patch("lambda_tasks.models.TimeoutContext"):
-            with patch.object(_task_retry_raises, "execute_on_commit"):
+            with patch.object(SQSLambdaTask, "execute_on_commit"):
                 msg.execute_immediately(message_id=message_id)
     record = TaskRecord.objects.get(pk=message_id)
     assert record.status == TaskRecord.TaskStatus.RETRYING
@@ -1410,9 +1398,7 @@ def test_property_7_non_matching_exc_fails_no_retry(exc_type_name):
         return_value=_task_retry_raises_non_matching,
     ):
         with patch("lambda_tasks.models.TimeoutContext"):
-            with patch.object(
-                _task_retry_raises_non_matching, "execute_on_commit"
-            ) as mock_eoc:
+            with patch.object(SQSLambdaTask, "execute_on_commit") as mock_eoc:
                 msg.execute_immediately(message_id=message_id)
     mock_eoc.assert_not_called()
     record = TaskRecord.objects.get(pk=message_id)
@@ -1436,39 +1422,13 @@ def test_property_8_max_retries_exceeded_raises_and_fails(n_retries, exc_type_na
     message_id = str(uuid.uuid4())
     with patch("lambda_tasks.models.import_string", return_value=_task_retry_raises):
         with patch("lambda_tasks.models.TimeoutContext"):
-            with patch.object(_task_retry_raises, "execute_on_commit") as mock_eoc:
+            with patch.object(SQSLambdaTask, "execute_on_commit") as mock_eoc:
                 with pytest.raises(MaxRetriesExceededError):
                     msg.execute_immediately(message_id=message_id)
     mock_eoc.assert_not_called()
     record = TaskRecord.objects.get(pk=message_id)
     assert record.status == TaskRecord.TaskStatus.FAILED
     assert record.traceback is not None
-
-
-@pytest.mark.django_db(transaction=True)
-@given(delay=st.integers(min_value=1, max_value=900))
-@h_settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
-def test_property_10_non_zero_delay_used_as_retry_delay(delay):
-    """Property 10: non-zero wrapper delay is used as retry _delay.
-    Validates: Requirements 5.1"""
-
-    @lambda_task(retry_on=(ValueError,), delay=delay)
-    def _task_raises_for_delay(*, x: int) -> None:
-        raise ValueError("delay test")
-
-    msg = SQSLambdaTaskMessage(
-        task_name=_task_name(_task_raises_for_delay),
-        kwargs={"x": 1},
-        n_retries=0,
-    )
-    with patch(
-        "lambda_tasks.models.import_string", return_value=_task_raises_for_delay
-    ):
-        with patch("lambda_tasks.models.TimeoutContext"):
-            with patch.object(_task_raises_for_delay, "execute_on_commit") as mock_eoc:
-                msg.execute_immediately(message_id=str(uuid.uuid4()))
-    mock_eoc.assert_called_once()
-    assert mock_eoc.call_args.kwargs["_delay"] == delay
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1487,15 +1447,22 @@ def test_property_11_zero_delay_produces_delay_in_range():
             kwargs={"x": 1},
             n_retries=0,
         )
+        captured_tasks: list[SQSLambdaTask] = []
+
+        def capturing_execute_on_commit(self: SQSLambdaTask) -> None:
+            captured_tasks.append(self)
+
         with patch(
             "lambda_tasks.models.import_string", return_value=_task_raises_zero_delay
         ):
             with patch("lambda_tasks.models.TimeoutContext"):
                 with patch.object(
-                    _task_raises_zero_delay, "execute_on_commit"
-                ) as mock_eoc:
+                    SQSLambdaTask, "execute_on_commit", capturing_execute_on_commit
+                ):
                     msg.execute_immediately(message_id=str(uuid.uuid4()))
-        delays_seen.append(mock_eoc.call_args.kwargs["_delay"])
+
+        assert len(captured_tasks) == 1
+        delays_seen.append(captured_tasks[0].delay)
 
     for d in delays_seen:
         assert isinstance(d, int)
@@ -1524,3 +1491,143 @@ def test_task_takes_not_json_seralizable():
 
     record = TaskRecord.objects.get(pk=message_id)
     assert record.kwargs == {"x": execution_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ")}
+
+
+# ---------------------------------------------------------------------------
+# Feature: retry-delay — Task 9.1: Failing tests for updated retry path
+# ---------------------------------------------------------------------------
+
+
+@lambda_task(retry_on=(ValueError,), retry_delay=30)
+def _task_raises_for_retry_delay_nonzero(*, x: int) -> None:
+    """Raises ValueError — used to test non-zero retry_delay enqueue. Module-level for import_string."""
+    raise ValueError("retry delay test")
+
+
+@lambda_task(retry_on=(ValueError,), retry_delay=0)
+def _task_raises_for_retry_delay_zero(*, x: int) -> None:
+    """Raises ValueError — used to test zero retry_delay jitter enqueue. Module-level for import_string."""
+    raise ValueError("zero retry delay test")
+
+
+# Feature: retry-delay, Property 4: non-zero retry_delay is used in the retry enqueue
+# Validates: Requirements 3.1
+@pytest.mark.django_db(transaction=True)
+@given(retry_delay=st.integers(min_value=1, max_value=900))
+@h_settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+def test_property_retry_delay_nonzero_used_in_retry_enqueue(retry_delay):
+    """Property 4: non-zero retry_delay is used as delay in the retry SQSLambdaTask.
+    Validates: Requirements 3.1"""
+
+    @lambda_task(retry_on=(ValueError,), retry_delay=retry_delay)
+    def _task_raises_for_retry_delay(*, x: int) -> None:
+        raise ValueError("retry delay test")
+
+    msg = SQSLambdaTaskMessage(
+        task_name=_task_name(_task_raises_for_retry_delay),
+        kwargs={"x": 1},
+        n_retries=0,
+    )
+    captured_tasks: list[SQSLambdaTask] = []
+
+    def capturing_execute_on_commit(self: SQSLambdaTask) -> None:
+        captured_tasks.append(self)
+
+    with patch(
+        "lambda_tasks.models.import_string", return_value=_task_raises_for_retry_delay
+    ):
+        with patch("lambda_tasks.models.TimeoutContext"):
+            with patch.object(
+                SQSLambdaTask, "execute_on_commit", capturing_execute_on_commit
+            ):
+                msg.execute_immediately(message_id=str(uuid.uuid4()))
+
+    assert len(captured_tasks) == 1
+    assert captured_tasks[0].delay == retry_delay
+
+
+# Feature: retry-delay, Property 5: zero retry_delay produces jitter in [1, 5]
+# Validates: Requirements 3.2, 3.3
+@pytest.mark.django_db(transaction=True)
+def test_retry_delay_zero_produces_jitter_in_range():
+    """Property 5: zero retry_delay → retry delay in [1, 5].
+    Validates: Requirements 3.2, 3.3"""
+
+    @lambda_task(retry_on=(ValueError,), retry_delay=0)
+    def _task_raises_zero_retry_delay(*, x: int) -> None:
+        raise ValueError("zero retry delay test")
+
+    delays_seen: list[int] = []
+    for _ in range(100):
+        msg = SQSLambdaTaskMessage(
+            task_name=_task_name(_task_raises_zero_retry_delay),
+            kwargs={"x": 1},
+            n_retries=0,
+        )
+        captured_tasks: list[SQSLambdaTask] = []
+
+        def capturing_execute_on_commit(self: SQSLambdaTask) -> None:
+            captured_tasks.append(self)
+
+        with patch(
+            "lambda_tasks.models.import_string",
+            return_value=_task_raises_zero_retry_delay,
+        ):
+            with patch("lambda_tasks.models.TimeoutContext"):
+                with patch.object(
+                    SQSLambdaTask, "execute_on_commit", capturing_execute_on_commit
+                ):
+                    msg.execute_immediately(message_id=str(uuid.uuid4()))
+
+        assert len(captured_tasks) == 1
+        delays_seen.append(captured_tasks[0].delay)
+
+    for d in delays_seen:
+        assert isinstance(d, int)
+        assert 1 <= d <= 5
+
+
+# Feature: retry-delay, Property 6: normal enqueue uses decorator delay
+# Validates: Requirements 4.3, 4.4
+@pytest.mark.django_db(transaction=True)
+@given(decorator_delay=st.integers(min_value=0, max_value=900))
+@h_settings(
+    max_examples=100,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
+)
+def test_normal_execute_on_commit_uses_decorator_delay(settings, decorator_delay):
+    """Property 6: normal execute_on_commit uses decorator delay, not retry_delay.
+    Validates: Requirements 4.3, 4.4"""
+    settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
+
+    retry_delay_value = min(decorator_delay + 1, 900) if decorator_delay < 900 else 0
+
+    @lambda_task(
+        delay=decorator_delay, retry_on=(ValueError,), retry_delay=retry_delay_value
+    )
+    def _task_for_normal_enqueue(*, x: int) -> None:
+        pass
+
+    with patch("lambda_tasks.models.boto3") as mock_b3:
+        mock_client = MagicMock()
+        mock_b3.client.return_value = mock_client
+        import django.db.transaction as _transaction
+
+        with _transaction.atomic():
+            _task_for_normal_enqueue.execute_on_commit(x=1)
+
+    mock_client.send_message.assert_called_once()
+    assert mock_client.send_message.call_args.kwargs["DelaySeconds"] == decorator_delay
+
+
+def test_passing_delay_to_execute_on_commit_raises_validation_error():
+    """Passing _delay to execute_on_commit raises ValidationError (extra='forbid' on kwargs model).
+    Validates: Requirements 4.1, 4.2"""
+    from pydantic import ValidationError
+
+    @lambda_task
+    def _task_simple(*, x: int) -> None:
+        pass
+
+    with pytest.raises(ValidationError):
+        _task_simple.execute_on_commit(x=1, _delay=5)

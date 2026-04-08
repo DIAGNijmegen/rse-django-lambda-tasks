@@ -29,7 +29,7 @@ env vars reference it.  Results are cached in-process so repeated calls to
 import json
 import logging
 import os
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import boto3
 
@@ -98,7 +98,7 @@ def _parse_reference(*, env_var: str, value: str) -> _SecretReference:
     )
 
 
-def _fetch_secret(*, client: object, ref: _SecretReference) -> dict[str, str]:
+def _fetch_secret(*, client: Any, ref: _SecretReference) -> dict[str, str]:
     """Fetch a secret string from Secrets Manager, using the module cache.
 
     The cache key is ``(arn, version_stage, version_id)`` so that references
@@ -111,7 +111,7 @@ def _fetch_secret(*, client: object, ref: _SecretReference) -> dict[str, str]:
 
     logger.debug(f"Fetching secret {ref}")
 
-    response = client.get_secret_value(  # type: ignore[union-attr]
+    response = client.get_secret_value(
         SecretId=ref.arn,
         VersionStage=ref.version_stage,
         VersionId=ref.version_id,

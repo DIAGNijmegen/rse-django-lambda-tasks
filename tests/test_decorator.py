@@ -82,11 +82,13 @@ class TestLambdaTaskWrapperOnCommit:
 
     def test_on_commit_accepts_delay_override(self):
         wrapper = LambdaTaskWrapper(sample_task)
-        wrapper.execute_on_commit(x=1, _delay=10)
+        with pytest.raises(pydantic.ValidationError):
+            wrapper.execute_on_commit(x=1, _delay=10)
 
     def test_on_commit_accepts_delay_and_task_kwargs(self):
         wrapper = LambdaTaskWrapper(sample_task)
-        wrapper.execute_on_commit(x=1, y="test", _delay=5)
+        with pytest.raises(pydantic.ValidationError):
+            wrapper.execute_on_commit(x=1, y="test", _delay=5)
 
 
 # ---------------------------------------------------------------------------
@@ -441,13 +443,13 @@ class TestOnCommitOutsideTransaction:
 
     def test_override_delay_passed_to_enqueue(self, settings):
         settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
-        wrapper = _make_wrapper()
+        wrapper = _make_wrapper(delay=30)
         captured: list = []
         with patch(
             "lambda_tasks.models.transaction.on_commit",
             side_effect=lambda cb: captured.append(cb),
         ):
-            wrapper.execute_on_commit(x=1, _delay=30)
+            wrapper.execute_on_commit(x=1)
         assert captured[0].__self__.delay == 30
 
     def test_wrapper_default_delay_used_when_no_override(self, settings):

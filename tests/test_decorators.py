@@ -4,6 +4,7 @@ Tests for lambda_tasks.decorators — LambdaTaskWrapper and lambda_task decorato
 Covers retry_on validation, no-overlap validation, and decorator forwarding.
 """
 
+import pydantic
 import pytest
 from hypothesis import HealthCheck, given
 from hypothesis import settings as h_settings
@@ -139,3 +140,197 @@ def test_property_12_overlapping_retry_on_ignore_errors_raises_type_error(
             retry_on=retry_on,
             ignore_errors=ignore_errors,
         )
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _validate_delay (Requirements 2.1, 2.3)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_delay_negative_raises_value_error():
+    """delay < 0 raises ValueError. Requirement 2.1"""
+    with pytest.raises(ValueError):
+        LambdaTaskWrapper(_make_func(), delay=-1)
+
+
+def test_validate_delay_above_max_raises_value_error():
+    """delay > 900 raises ValueError. Requirement 2.1"""
+    with pytest.raises(ValueError):
+        LambdaTaskWrapper(_make_func(), delay=901)
+
+
+def test_validate_delay_zero_is_accepted():
+    """delay=0 is accepted (lower boundary). Requirement 2.3"""
+    wrapper = LambdaTaskWrapper(_make_func(), delay=0)
+    assert wrapper._delay == 0
+
+
+def test_validate_delay_max_is_accepted():
+    """delay=900 is accepted (upper boundary). Requirement 2.3"""
+    wrapper = LambdaTaskWrapper(_make_func(), delay=900)
+    assert wrapper._delay == 900
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: retry_delay init and _validate_retry_delay (Requirements 1.1, 1.3, 1.4, 2.2, 2.4)
+# ---------------------------------------------------------------------------
+
+
+def test_retry_delay_defaults_to_zero():
+    """retry_delay defaults to 0 when not supplied. Requirement 1.1"""
+    wrapper = LambdaTaskWrapper(_make_func())
+    assert wrapper._retry_delay == 0
+
+
+def test_retry_delay_zero_with_empty_retry_on_is_accepted():
+    """retry_delay=0 with empty retry_on is accepted. Requirement 2.4"""
+    wrapper = LambdaTaskWrapper(_make_func(), retry_delay=0)
+    assert wrapper._retry_delay == 0
+
+
+def test_retry_delay_positive_with_nonempty_retry_on_is_accepted():
+    """retry_delay > 0 with non-empty retry_on is accepted. Requirement 1.3"""
+    wrapper = LambdaTaskWrapper(_make_func(), retry_delay=30, retry_on=(ValueError,))
+    assert wrapper._retry_delay == 30
+
+
+def test_retry_delay_positive_with_empty_retry_on_raises_type_error():
+    """retry_delay > 0 with empty retry_on raises TypeError. Requirement 1.4"""
+    with pytest.raises(TypeError):
+        LambdaTaskWrapper(_make_func(), retry_delay=30)
+
+
+def test_retry_delay_negative_raises_value_error():
+    """retry_delay < 0 raises ValueError. Requirement 2.2"""
+    with pytest.raises(ValueError):
+        LambdaTaskWrapper(_make_func(), retry_delay=-1, retry_on=(ValueError,))
+
+
+def test_retry_delay_above_max_raises_value_error():
+    """retry_delay > 900 raises ValueError. Requirement 2.2"""
+    with pytest.raises(ValueError):
+        LambdaTaskWrapper(_make_func(), retry_delay=901, retry_on=(ValueError,))
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: retry_delay property (Requirements 1.2)
+# ---------------------------------------------------------------------------
+
+
+def test_retry_delay_property_returns_value_passed_at_construction():
+    """retry_delay property returns the value passed at construction. Requirement 1.2"""
+    wrapper = LambdaTaskWrapper(_make_func(), retry_delay=30, retry_on=(ValueError,))
+    assert wrapper.retry_delay == 30
+
+
+def test_retry_delay_property_defaults_to_zero():
+    """retry_delay property defaults to 0 when not supplied. Requirement 1.2"""
+    wrapper = LambdaTaskWrapper(_make_func())
+    assert wrapper.retry_delay == 0
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: queue property
+# ---------------------------------------------------------------------------
+
+
+def test_queue_property_returns_value_passed_at_construction():
+    """queue property returns the queue name passed at construction."""
+    wrapper = LambdaTaskWrapper(_make_func(), queue="high-priority")
+    assert wrapper.queue == "high-priority"
+
+
+def test_queue_property_defaults_to_default():
+    """queue property defaults to 'default' when not supplied."""
+    wrapper = LambdaTaskWrapper(_make_func())
+    assert wrapper.queue == "default"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _build_task behaviour (Requirements 4.1, 4.2, 4.3)
+# ---------------------------------------------------------------------------
+
+
+def test_passing_delay_kwarg_to_execute_on_commit_raises_validation_error():
+    """Passing _delay to execute_on_commit raises pydantic.ValidationError. Requirement 4.1, 4.2"""
+    wrapper = LambdaTaskWrapper(_make_func(), delay=10)
+    with pytest.raises(pydantic.ValidationError):
+        wrapper._build_task(kwargs={"x": 1, "_delay": 5})
+
+
+def test_build_task_uses_decorator_delay_not_call_time_override():
+    """_build_task uses the decorator delay, not a call-time override. Requirement 4.3"""
+    decorator_delay = 42
+    wrapper = LambdaTaskWrapper(_make_func(), delay=decorator_delay)
+    task = wrapper._build_task(kwargs={"x": 1})
+    assert task.delay == decorator_delay
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: lambda_task forwarding retry_delay (Requirements 1.1, 1.2)
+# ---------------------------------------------------------------------------
+
+
+def test_lambda_task_forwards_retry_delay():
+    """lambda_task forwards retry_delay to LambdaTaskWrapper. Requirements 1.1, 1.2"""
+
+    @lambda_task(retry_delay=30, retry_on=(ValueError,))
+    def _task(*, x: int) -> None:
+        pass
+
+    assert _task.retry_delay == 30
+
+
+def test_lambda_task_retry_delay_defaults_to_zero():
+    """lambda_task without retry_delay produces wrapper.retry_delay == 0. Requirements 1.1, 1.2"""
+
+    @lambda_task
+    def _task(*, x: int) -> None:
+        pass
+
+    assert _task.retry_delay == 0
+
+
+# ---------------------------------------------------------------------------
+# retry-delay property-based tests
+# ---------------------------------------------------------------------------
+
+
+# Feature: retry-delay, Property 1: retry_delay storage round-trip
+# Validates: Requirements 1.2
+@given(retry_delay=st.integers(min_value=0, max_value=900))
+@h_settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+def test_property_retry_delay_1_storage_round_trip(retry_delay):
+    """Property 1: for any retry_delay in [0, 900], wrapper.retry_delay returns the same value.
+    Validates: Requirements 1.2"""
+    if retry_delay == 0:
+        wrapper = LambdaTaskWrapper(_make_func(), retry_delay=retry_delay)
+    else:
+        wrapper = LambdaTaskWrapper(
+            _make_func(), retry_delay=retry_delay, retry_on=(ValueError,)
+        )
+    assert wrapper.retry_delay == retry_delay
+
+
+# Feature: retry-delay, Property 2: retry_delay requires retry_on
+# Validates: Requirements 1.4
+@given(retry_delay=st.integers(min_value=1, max_value=900))
+@h_settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+def test_property_retry_delay_2_requires_retry_on(retry_delay):
+    """Property 2: for any retry_delay in [1, 900], constructing with empty retry_on raises TypeError.
+    Validates: Requirements 1.4"""
+    with pytest.raises(TypeError):
+        LambdaTaskWrapper(_make_func(), retry_delay=retry_delay)
+
+
+# Feature: retry-delay, Property 3: out-of-range delay and retry_delay raise ValueError
+# Validates: Requirements 2.1, 2.2
+@given(value=st.integers().filter(lambda x: x < 0 or x > 900))
+@h_settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+def test_property_retry_delay_3_out_of_range_raises_value_error(value):
+    """Property 3: for any integer outside [0, 900], both delay and retry_delay raise ValueError.
+    Validates: Requirements 2.1, 2.2"""
+    with pytest.raises(ValueError):
+        LambdaTaskWrapper(_make_func(), delay=value)
+    with pytest.raises(ValueError):
+        LambdaTaskWrapper(_make_func(), retry_delay=value, retry_on=(ValueError,))

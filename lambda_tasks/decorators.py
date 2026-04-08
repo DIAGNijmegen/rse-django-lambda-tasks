@@ -21,7 +21,7 @@ from lambda_tasks.models import SQSLambdaTask, SQSLambdaTaskMessage
 from lambda_tasks.settings import MAX_TIMEOUT, LambdaTasksSettings
 
 
-def _build_kwargs_model(func: Callable[..., Any]) -> type[pydantic.BaseModel]:
+def _build_kwargs_model(func: types.FunctionType) -> type[pydantic.BaseModel]:
     """Build a Pydantic model matching the keyword-only parameters of *func*.
 
     The model uses strict mode to prevent silent coercion (e.g. "1" → int),
@@ -43,7 +43,7 @@ def _build_kwargs_model(func: Callable[..., Any]) -> type[pydantic.BaseModel]:
             fields[name] = (annotation, param.default)
 
     return pydantic.create_model(
-        f"_{func.__name__}_kwargs",  # type: ignore[union-attr]
+        f"_{func.__name__}_kwargs",
         __config__=pydantic.ConfigDict(strict=True, extra="forbid"),
         **fields,
     )
@@ -62,9 +62,10 @@ class LambdaTaskWrapper:
 
     def __init__(
         self,
-        func: Callable[..., Any],
+        func: types.FunctionType,
         *,
         delay: int = 0,
+        retry_delay: int = 0,
         soft_timeout: int | None = None,
         hard_timeout: int | None = None,
         queue: str = "default",
@@ -73,14 +74,17 @@ class LambdaTaskWrapper:
     ) -> None:
         self._validate_func(func=func)
         self._validate_timeouts(soft_timeout=soft_timeout, hard_timeout=hard_timeout)
+        self._validate_delay(delay=delay)
+        self._validate_retry_delay(retry_delay=retry_delay, retry_on=retry_on)
         self._validate_ignore_errors(ignore_errors=ignore_errors)
         self._validate_retry_on(retry_on=retry_on)
         self._validate_no_overlap(retry_on=retry_on, ignore_errors=ignore_errors)
 
         functools.update_wrapper(self, func)
 
-        self._func: types.FunctionType = func  # type: ignore[assignment]
+        self._func: types.FunctionType = func
         self._delay = delay
+        self._retry_delay = retry_delay
         self._soft_timeout = soft_timeout
         self._hard_timeout = hard_timeout
         self._queue = queue
@@ -138,15 +142,14 @@ class LambdaTaskWrapper:
         return self._func(**kwargs)
 
     def _build_task(self, *, kwargs: dict[str, Any]) -> SQSLambdaTask:
-        """Pop overrides, validate kwargs, and build a SQSLambdaSQSLambdaTaskMessage.
+        """Pop overrides, validate kwargs, and build a SQSLambdaTask.
 
-        Mutates *kwargs* in-place (pops ``_delay`` and ``_n_retries``).
+        Mutates *kwargs* in-place (pops ``_n_retries``).
         Returns ``SQSLambdaTask``.
 
         Raises:
             pydantic.ValidationError: if the remaining kwargs fail type validation.
         """
-        delay = kwargs.pop("_delay", self._delay)
         n_retries = kwargs.pop("_n_retries", 0)
 
         self._kwargs_model.model_validate(kwargs)
@@ -159,15 +162,12 @@ class LambdaTaskWrapper:
 
         return SQSLambdaTask(
             message=message,
-            delay=delay,
+            delay=self._delay,
             queue=self._queue,
         )
 
     def serialize(self, **kwargs: Any) -> dict:
         """Serialize this task invocation to a JSON-compatible dict for deferred enqueuing.
-
-        Accepts task kwargs plus reserved override kwargs:
-            _delay: int
 
         Returns a dict matching SQSLambdaTaskMessage schema
 
@@ -178,21 +178,17 @@ class LambdaTaskWrapper:
         return task.model_dump()
 
     def execute_on_commit(self, **kwargs: Any) -> None:
-        """Enqueue the task to run after the current transaction commits.
-
-        Accepts task kwargs plus reserved override kwargs:
-            _delay: int
-        """
+        """Enqueue the task to run after the current transaction commits."""
         task = self._build_task(kwargs=kwargs)
         task.execute_on_commit()
 
     @staticmethod
-    def _validate_func(*, func: Callable[..., Any]) -> None:
+    def _validate_func(*, func: types.FunctionType) -> None:
         """Raise TypeError if *func* has positional, **kwargs, underscore-prefixed, or unannotated parameters."""
         sig = inspect.signature(func)
         hints = func.__annotations__.copy()
         hints.pop("return", None)
-        name: str = getattr(func, "__name__", repr(func))
+        name: str = func.__name__
 
         for param in sig.parameters.values():
             if param.kind in (
@@ -221,6 +217,16 @@ class LambdaTaskWrapper:
                 )
 
     @property
+    def retry_delay(self) -> int:
+        """Delay in seconds used when enqueuing a retry. 0 means use jitter."""
+        return self._retry_delay
+
+    @property
+    def queue(self) -> str:
+        """The SQS queue name this task is routed to."""
+        return self._queue
+
+    @property
     def ignore_errors(self) -> tuple[type[BaseException], ...]:
         """Exception types that are treated as non-fatal during task execution."""
         return self._ignore_errors
@@ -229,6 +235,30 @@ class LambdaTaskWrapper:
     def retry_on(self) -> tuple[type[BaseException], ...]:
         """Exception types that trigger an automatic retry."""
         return self._retry_on
+
+    @staticmethod
+    def _validate_delay(*, delay: int) -> None:
+        """Raise ValueError if delay is outside the allowed range [0, 900]."""
+        if delay < 0 or delay > 900:
+            raise ValueError(f"delay ({delay}) must be in the range [0, 900].")
+
+    @staticmethod
+    def _validate_retry_delay(
+        *,
+        retry_delay: int,
+        retry_on: tuple[type[BaseException], ...],
+    ) -> None:
+        """Raise ValueError if retry_delay is outside [0, 900], or TypeError if retry_delay != 0 and retry_on is empty."""
+        if retry_delay < 0 or retry_delay > 900:
+            raise ValueError(
+                f"retry_delay ({retry_delay}) must be in the range [0, 900]."
+            )
+
+        if retry_delay != 0 and not retry_on:
+            raise TypeError(
+                f"retry_delay ({retry_delay}) requires retry_on to be non-empty — "
+                f"retry_delay only applies when the task is configured to retry."
+            )
 
     @staticmethod
     def _validate_ignore_errors(
@@ -293,9 +323,10 @@ class LambdaTaskWrapper:
 
 @overload
 def lambda_task(
-    func: Callable[..., Any],
+    func: types.FunctionType,
     *,
     delay: int = ...,
+    retry_delay: int = ...,
     soft_timeout: int | None = ...,
     hard_timeout: int | None = ...,
     queue: str = ...,
@@ -309,24 +340,26 @@ def lambda_task(
     func: None = None,
     *,
     delay: int = ...,
+    retry_delay: int = ...,
     soft_timeout: int | None = ...,
     hard_timeout: int | None = ...,
     queue: str = ...,
     ignore_errors: tuple[type[BaseException], ...] = ...,
     retry_on: tuple[type[BaseException], ...] = ...,
-) -> Callable[[Callable[..., Any]], LambdaTaskWrapper]: ...
+) -> Callable[[types.FunctionType], LambdaTaskWrapper]: ...
 
 
 def lambda_task(
-    func: Callable[..., Any] | None = None,
+    func: types.FunctionType | None = None,
     *,
     delay: int = 0,
+    retry_delay: int = 0,
     soft_timeout: int | None = None,
     hard_timeout: int | None = None,
     queue: str = "default",
     ignore_errors: tuple[type[BaseException], ...] = (),
     retry_on: tuple[type[BaseException], ...] = (),
-) -> LambdaTaskWrapper | Callable[[Callable[..., Any]], LambdaTaskWrapper]:
+) -> LambdaTaskWrapper | Callable[[types.FunctionType], LambdaTaskWrapper]:
     """Decorator factory that registers a function as a background task.
 
     Can be used with or without parentheses::
@@ -338,10 +371,11 @@ def lambda_task(
         def my_task(*, x: int): ...
     """
 
-    def _decorate(f: Callable[..., Any]) -> LambdaTaskWrapper:
+    def _decorate(f: types.FunctionType) -> LambdaTaskWrapper:
         wrapper = LambdaTaskWrapper(
             f,
             delay=delay,
+            retry_delay=retry_delay,
             soft_timeout=soft_timeout,
             hard_timeout=hard_timeout,
             queue=queue,

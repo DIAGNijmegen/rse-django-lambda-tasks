@@ -1,5 +1,6 @@
 """Django model for persisting task execution records."""
 
+import datetime
 import random
 import traceback
 import uuid
@@ -49,8 +50,11 @@ class TaskRecord(models.Model):
     traceback = models.TextField(null=True, editable=False)
 
     @property
-    def duration(self) -> object:
-        return self.end_time - self.start_time  # type: ignore[operator]
+    def duration(self) -> datetime.timedelta | None:
+        try:
+            return self.end_time - self.start_time  # ty: ignore[unsupported-operator]
+        except TypeError:
+            return None
 
     class Meta:
         ordering = ["-start_time"]
@@ -160,15 +164,22 @@ class SQSLambdaTaskMessage(BaseModel):
                         )
 
                         delay = (
-                            wrapper._delay
-                            if wrapper._delay != 0
+                            wrapper.retry_delay
+                            if wrapper.retry_delay != 0
                             else round(random.uniform(1, 5))
                         )
-                        wrapper.execute_on_commit(
-                            **self.kwargs,
-                            _delay=delay,
-                            _n_retries=self.n_retries + 1,
+
+                        retry_task = SQSLambdaTask(
+                            message=SQSLambdaTaskMessage(
+                                task_name=self.task_name,
+                                kwargs=self.kwargs,
+                                n_retries=self.n_retries + 1,
+                            ),
+                            delay=delay,
+                            queue=wrapper.queue,
                         )
+                        retry_task.execute_on_commit()
+
                         return
                 else:
                     task_logger.error(error, exc_info=True)

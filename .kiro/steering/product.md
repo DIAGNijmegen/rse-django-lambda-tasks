@@ -23,7 +23,7 @@ Key modules:
 
 ```python
 # Always kwargs-only — positional args raise TypeError at decoration time
-@lambda_task(delay=0, soft_timeout=60, hard_timeout=120, queue="default",
+@lambda_task(delay=0, retry_delay=30, soft_timeout=60, hard_timeout=120, queue="default",
              ignore_errors=(SomeExpectedException,),
              retry_on=(TransientError,))
 def my_task(*, user_id: int, action: str) -> None:
@@ -37,10 +37,7 @@ def my_task(*, user_id: int, action: str) -> None:
 
 ## Enqueuing
 
-`execute_on_commit()` accepts per-call overrides via underscore-prefixed kwargs:
-- `_delay`
-
-Resolution order for delay: call override → decorator default
+`execute_on_commit()` uses the decorator `delay` value. There are no per-call overrides.
 
 ## ignore_errors
 
@@ -79,7 +76,7 @@ def sync_data(*, record_id: int) -> None:
     ...
 ```
 
-**Retry delay:** when a retry is enqueued, the `_delay` is set to the wrapper's configured `delay` if non-zero, otherwise `max(1, round(random.uniform(0, 5)))` seconds.
+**Retry delay:** when a retry is enqueued, the delay is set to `retry_delay` if non-zero, otherwise `round(random.uniform(1, 5))` seconds (jitter).
 
 **Max retries:** controlled by `LAMBDA_TASKS_MAX_RETRIES` (default `2880`, i.e. 60 × 24 × 2). When `n_retries >= MAX_RETRIES`, `MaxRetriesExceededError` is raised instead of enqueuing another retry. This exception propagates to the Lambda handler and is reported as a `batchItemFailure`.
 
@@ -89,16 +86,17 @@ def sync_data(*, record_id: int) -> None:
 
 ```python
 class SQSLambdaTaskMessage(BaseModel):
-    task_name: str        # fully-qualified: "myapp.tasks.my_task"
-    invocation_id: str    # UUID4, generated fresh per enqueue
+    task_name: str   # fully-qualified: "myapp.tasks.my_task"
     kwargs: dict
-    n_retries: int        # retry counter, default 0, must be >= 0
+    n_retries: int   # retry counter, default 0, must be >= 0
 ```
+
+`invocation_id` was removed — deduplication now uses the SQS `messageId` as the `TaskRecord` primary key. kwargs are serialized to JSON via `model_dump(mode="json")` before being stored on `TaskRecord`.
 
 ## Execution
 
-`SQSLambdaTaskMessage.execute_immediately()` in `models.py`:
-1. Checks for an existing `TaskRecord` with the same `pk` via `get_or_create`
+`SQSLambdaTaskMessage.execute_immediately(*, message_id: str)` in `models.py`:
+1. Checks for an existing `TaskRecord` with the same `pk` (`message_id`) via `get_or_create`
 2. If a record already exists (any status), logs and returns immediately — duplicate deliveries are silently skipped
 3. Resolves timeouts: decorator default → settings defaults (soft=270s, hard=300s)
 4. Runs task inside `transaction.atomic()` + `TimeoutContext`
@@ -112,6 +110,7 @@ class SQSLambdaTaskMessage(BaseModel):
 
 `handler(event, context)` in `handler.py`:
 - Processes each SQS record independently
+- Passes `record["messageId"]` as `message_id` to `execute_immediately()` — this becomes the `TaskRecord` primary key, enabling deduplication on redelivery
 - Returns `{"batchItemFailures": [...]}` for partial-batch failure reporting
 - Only pre-execution failures (malformed message, import error, misconfiguration) are reported as `batchItemFailures` — task logic failures are caught and recorded as `FAILED` TaskRecords without raising
 - Recommended SQS queue settings: `maxReceiveCount=1` with a DLQ configured; automatic retries are not useful since task failures are not re-driven by design
@@ -141,7 +140,7 @@ Behaviour:
 
 ## TaskRecord Model
 
-Fields: `task_name`, `pk` (unique UUID), `kwargs`, `status`, `start_time`, `end_time`, `result`, `traceback`
+Fields: `id` (UUID primary key — set to the SQS `messageId`), `task_name`, `kwargs`, `n_retries`, `status`, `start_time`, `end_time`, `result`, `traceback`
 
 Statuses: `RUNNING`, `SUCCESS`, `FAILED`, `RETRYING`
 
@@ -162,6 +161,8 @@ Statuses: `RUNNING`, `SUCCESS`, `FAILED`, `RETRYING`
 ## Eager Mode
 
 Set `LAMBDA_TASKS_EAGER = True` to run tasks synchronously in-process (no SQS). Useful for local development and tests.
+
+In eager mode a random UUID4 is generated as the `message_id` passed to `execute_immediately()`.
 
 **Timeouts are not enforced in eager mode.** `TimeoutContext` is skipped entirely — `SIGALRM`-based timeouts require a Lambda worker process, not a Django dev server thread. Timeout values are still validated at decoration time.
 

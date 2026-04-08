@@ -44,10 +44,9 @@ def test_to_json_uses_decorator_defaults_for_delay_and_queue():
 
 
 def test_to_json_uses_call_site_override_for_delay():
-    """_delay override at call site takes precedence over decorator default."""
-    result = _wrapper.serialize(x=1, _delay=30)
-    assert result["delay"] == 30
-    assert result["queue"] == "default"
+    """_delay at call site is no longer supported — it raises pydantic.ValidationError."""
+    with pytest.raises(ValidationError):
+        _wrapper.serialize(x=1, _delay=30)
 
 
 def test_to_json_task_name_matches_module_qualname():
