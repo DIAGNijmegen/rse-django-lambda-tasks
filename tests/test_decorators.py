@@ -334,3 +334,83 @@ def test_property_retry_delay_3_out_of_range_raises_value_error(value):
         LambdaTaskWrapper(_make_func(), delay=value)
     with pytest.raises(ValueError):
         LambdaTaskWrapper(_make_func(), retry_delay=value, retry_on=(ValueError,))
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: singleton defaults and forwarding (Requirements 1.1, 1.2, 1.3)
+# ---------------------------------------------------------------------------
+
+
+def test_singleton_defaults_to_false() -> None:
+    """singleton defaults to False when not supplied. Requirement 1.1"""
+    wrapper = LambdaTaskWrapper(_make_func())
+    assert wrapper.singleton is False
+
+
+def test_singleton_true_is_stored_and_exposed_via_property() -> None:
+    """singleton=True is stored and exposed via property. Requirement 1.2"""
+    wrapper = LambdaTaskWrapper(_make_func(), singleton=True)
+    assert wrapper.singleton is True
+
+
+def test_lambda_task_forwards_singleton_true() -> None:
+    """lambda_task(singleton=True) forwards to wrapper. Requirements 1.1, 1.2"""
+
+    @lambda_task(singleton=True)
+    def _task(*, x: int) -> None:
+        pass
+
+    assert _task.singleton is True
+
+
+def test_lambda_task_without_singleton_defaults_to_false() -> None:
+    """@lambda_task without singleton produces wrapper.singleton == False. Requirements 1.1, 1.3"""
+
+    @lambda_task
+    def _task(*, x: int) -> None:
+        pass
+
+    assert _task.singleton is False
+
+
+# ---------------------------------------------------------------------------
+# singleton property-based tests
+# ---------------------------------------------------------------------------
+
+
+# Feature: singleton-task, Property 1: Singleton storage round-trip
+# Validates: Requirements 1.1, 1.2
+@given(singleton=st.booleans())
+@h_settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+def test_property_singleton_1_storage_round_trip(singleton: bool) -> None:
+    """Property 1: for any boolean b, LambdaTaskWrapper(func, singleton=b).singleton == b.
+    Validates: Requirements 1.1, 1.2"""
+    wrapper = LambdaTaskWrapper(_make_func(), singleton=singleton)
+    assert wrapper.singleton is singleton
+
+
+# ---------------------------------------------------------------------------
+# singleton validation: LockError must not be in retry_on
+# ---------------------------------------------------------------------------
+
+from redis.exceptions import LockError
+
+
+def test_singleton_with_lock_error_in_retry_on_raises_type_error() -> None:
+    """singleton=True with LockError in retry_on raises TypeError at decoration time."""
+    with pytest.raises(TypeError, match="retry_on must not include LockError"):
+        LambdaTaskWrapper(_make_func(), singleton=True, retry_on=(LockError,))
+
+
+def test_singleton_with_lock_error_superclass_in_retry_on_raises_type_error() -> None:
+    """singleton=True with a superclass of LockError in retry_on raises TypeError."""
+    # LockError inherits from Exception via redis.exceptions.RedisError
+    with pytest.raises(TypeError, match="retry_on must not include LockError"):
+        LambdaTaskWrapper(_make_func(), singleton=True, retry_on=(Exception,))
+
+
+def test_singleton_false_with_lock_error_in_retry_on_is_allowed() -> None:
+    """singleton=False with LockError in retry_on is fine — no implicit conflict."""
+    wrapper = LambdaTaskWrapper(_make_func(), singleton=False, retry_on=(LockError,))
+    assert wrapper.singleton is False
+    assert LockError in wrapper.retry_on

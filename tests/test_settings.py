@@ -139,3 +139,23 @@ def test_max_retries_override(settings):
     settings.LAMBDA_TASKS_MAX_RETRIES = 100
     conf = LambdaTasksSettings()
     assert conf.MAX_RETRIES == 100
+
+
+# ---------------------------------------------------------------------------
+# SINGLETON_CACHE
+# ---------------------------------------------------------------------------
+
+
+def test_singleton_cache_default_value():
+    from lambda_tasks.settings import LambdaTasksSettings
+
+    conf = LambdaTasksSettings()
+    assert conf.SINGLETON_CACHE == "default"
+
+
+def test_singleton_cache_reads_configured_value(settings):
+    from lambda_tasks.settings import LambdaTasksSettings
+
+    settings.LAMBDA_TASKS_SINGLETON_CACHE = "redis_locks"
+    conf = LambdaTasksSettings()
+    assert conf.SINGLETON_CACHE == "redis_locks"

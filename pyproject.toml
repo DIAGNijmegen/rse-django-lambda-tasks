@@ -15,6 +15,7 @@ dependencies = [
     "boto3",
     "django",
     "pydantic",
+    "redis",
 ]
 
 [dependency-groups]

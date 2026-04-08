@@ -9,7 +9,7 @@ As part of this change, the call-time `_delay` override kwarg accepted by `execu
 The two delay resolution paths remain entirely separate after this change:
 
 - **Normal enqueue** (`execute_on_commit` called directly by application code): uses `self._delay` from the decorator.
-- **Retry enqueue** (triggered by a retryable exception in the executor): uses `wrapper.retry_delay` if non-zero, otherwise falls back to `round(random.uniform(1, 5))` (jitter).
+- **Retry enqueue** (triggered by a retryable exception in the executor): uses `min(wrapper.retry_delay + round(random.uniform(1, 5)), 900)` — jitter is always added, capped at 900.
 
 Both `delay` and `retry_delay` are validated at decoration time against the SQS maximum `DelaySeconds` of 900 seconds. `retry_delay` is additionally validated to require a non-empty `retry_on` tuple when non-zero.
 

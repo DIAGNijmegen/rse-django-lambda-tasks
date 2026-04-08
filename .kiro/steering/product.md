@@ -25,7 +25,8 @@ Key modules:
 # Always kwargs-only — positional args raise TypeError at decoration time
 @lambda_task(delay=0, retry_delay=30, soft_timeout=60, hard_timeout=120, queue="default",
              ignore_errors=(SomeExpectedException,),
-             retry_on=(TransientError,))
+             retry_on=(TransientError,),
+             singleton=True)
 def my_task(*, user_id: int, action: str) -> None:
     ...
 ```
@@ -76,11 +77,30 @@ def sync_data(*, record_id: int) -> None:
     ...
 ```
 
-**Retry delay:** when a retry is enqueued, the delay is set to `retry_delay` if non-zero, otherwise `round(random.uniform(1, 5))` seconds (jitter).
+**Retry delay:** when a retry is enqueued, the delay is set to `min(retry_delay + round(random.uniform(1, 5)), 900)` seconds. The jitter is always added to spread out competing retries. The result is capped at 900 (the SQS `DelaySeconds` maximum).
 
 **Max retries:** controlled by `LAMBDA_TASKS_MAX_RETRIES` (default `2880`, i.e. 60 × 24 × 2). When `n_retries >= MAX_RETRIES`, `MaxRetriesExceededError` is raised instead of enqueuing another retry. This exception propagates to the Lambda handler and is reported as a `batchItemFailure`.
 
 `retry_on` is validated at decoration time — passing a non-exception type raises `TypeError` immediately. It is stored on `LambdaTaskWrapper` and read by the executor at execution time; it is never serialised into the SQS message.
+
+## singleton
+
+Pass `singleton=True` on `@lambda_task` to prevent concurrent execution of the same task. When enabled, the executor acquires a Redis lock via Django's cache framework before running the task function. The lock wraps the entire `transaction.atomic()` block — acquired before, released after.
+
+- Lock key format: `lambda_tasks.singleton_lock.{task_name}`
+- The lock is acquired with `blocking_timeout=0` (fail immediately if held) and `timeout=hard_timeout` (auto-expire if the worker crashes)
+- If the lock cannot be acquired (`LockError`), the executor treats it as a retryable exception — same code path as `retry_on`. The `TaskRecord` is set to `RETRYING`, the traceback is recorded, and the task is re-enqueued with `n_retries + 1`
+- If `n_retries` has reached `LAMBDA_TASKS_MAX_RETRIES`, `MaxRetriesExceededError` is raised and the record is saved as `FAILED`
+- The cache backend used for locks is controlled by `LAMBDA_TASKS_SINGLETON_CACHE` (default `"default"`)
+
+```python
+@lambda_task(singleton=True)
+def sync_inventory(*, warehouse_id: int) -> None:
+    # Only one instance runs at a time; LockError → RETRYING + re-enqueued
+    ...
+```
+
+`singleton` is stored on `LambdaTaskWrapper` and read by the executor at execution time; it is never serialised into the SQS message.
 
 ## SQS Message Schema (`SQSLambdaTaskMessage`)
 
@@ -99,12 +119,13 @@ class SQSLambdaTaskMessage(BaseModel):
 1. Checks for an existing `TaskRecord` with the same `pk` (`message_id`) via `get_or_create`
 2. If a record already exists (any status), logs and returns immediately — duplicate deliveries are silently skipped
 3. Resolves timeouts: decorator default → settings defaults (soft=270s, hard=300s)
-4. Runs task inside `transaction.atomic()` + `TimeoutContext`
-5. On success: updates record to `SUCCESS` with result and `end_time`
-6. On ignored exception (type matches `ignore_errors`): rolls back task-side writes, commits record as `SUCCESS` with traceback and `end_time`
-7. On retryable exception (type matches `retry_on`, `n_retries < MAX_RETRIES`): rolls back task-side writes, enqueues retry via `execute_on_commit` with `n_retries + 1`, commits record as `RETRYING` with traceback and `end_time`
-8. On retryable exception with `n_retries >= MAX_RETRIES`: commits record as `FAILED` with traceback, raises `MaxRetriesExceededError`
-9. On any other exception: rolls back atomic block, updates record to `FAILED` with traceback
+4. If `wrapper.singleton` is `True`, acquires a Redis lock via `caches[SINGLETON_CACHE].lock(lock_key)` wrapping the atomic block; if `False`, no lock is acquired
+5. Runs task inside `transaction.atomic()` + `TimeoutContext`
+6. On success: updates record to `SUCCESS` with result and `end_time`
+7. On ignored exception (type matches `ignore_errors`): rolls back task-side writes, commits record as `SUCCESS` with traceback and `end_time`
+8. On retryable exception (type matches `retry_on` or `LockError` for singleton tasks, `n_retries < MAX_RETRIES`): rolls back task-side writes, enqueues retry via `execute_on_commit` with `n_retries + 1`, commits record as `RETRYING` with traceback and `end_time`
+9. On retryable exception with `n_retries >= MAX_RETRIES`: commits record as `FAILED` with traceback, raises `MaxRetriesExceededError`
+10. On any other exception: rolls back atomic block, updates record to `FAILED` with traceback
 
 ## Lambda Handler
 
@@ -155,6 +176,7 @@ Statuses: `RUNNING`, `SUCCESS`, `FAILED`, `RETRYING`
 | `LAMBDA_TASKS_DEFAULT_HARD_TIMEOUT` | `300` | Hard timeout in seconds |
 | `LAMBDA_TASKS_EAGER` | `False` | Run tasks synchronously in-process (no SQS) |
 | `LAMBDA_TASKS_MAX_RETRIES` | `2880` | Maximum retry attempts before `MaxRetriesExceededError` is raised (60 × 24 × 2) |
+| `LAMBDA_TASKS_SINGLETON_CACHE` | `"default"` | Django cache backend used for singleton task locks |
 
 `LAMBDA_TASKS_QUEUES` must be set and include a `"default"` key. `soft_timeout` must always be strictly less than `hard_timeout`.
 

@@ -9,7 +9,7 @@ As part of this feature, the call-time `_delay` override kwarg accepted by `exec
 The two delay resolution paths are entirely separate:
 
 - **Normal enqueue** (`execute_on_commit` called directly): decorator `delay` only (no call-time override)
-- **Retry enqueue** (triggered by a retryable exception): `retry_delay` (if non-zero) → jitter (`round(random.uniform(1, 5))`)
+- **Retry enqueue** (triggered by a retryable exception): `min(retry_delay + round(random.uniform(1, 5)), 900)` — jitter is always added, capped at 900
 
 `retry_delay` is only meaningful when `retry_on` is also configured. Setting `retry_delay` without `retry_on` raises `TypeError` at decoration time.
 
@@ -20,9 +20,9 @@ Both `delay` and `retry_delay` are validated at decoration time against the SQS 
 - **Decorator**: The `@lambda_task` decorator factory defined in `decorators.py`.
 - **LambdaTaskWrapper**: The object produced by applying `@lambda_task` to a function; stores all decorator-level configuration.
 - **Executor**: `SQSLambdaTaskMessage.execute_immediately()` in `models.py`; runs the task and handles retries.
-- **retry_delay**: The new decorator parameter — a non-negative integer (seconds) used as the SQS `DelaySeconds` exclusively when enqueuing a retry. Not used for normal enqueues.
+- **retry_delay**: The new decorator parameter — a non-negative integer (seconds) used as the base SQS `DelaySeconds` when enqueuing a retry. Jitter is always added on top. Not used for normal enqueues.
 - **delay**: The existing decorator parameter — a non-negative integer (seconds) used as the SQS `DelaySeconds` for normal (non-retry) enqueues only.
-- **Jitter**: The fallback retry delay computed as `round(random.uniform(1, 5))` seconds when `retry_delay` is zero.
+- **Jitter**: Random delay of `round(random.uniform(1, 5))` seconds, always added to `retry_delay` when enqueuing a retry. The total is capped at 900.
 - **retry_on**: The existing decorator parameter — a tuple of exception types that trigger automatic retry.
 - **SQS_MAX_DELAY**: The SQS maximum allowed `DelaySeconds` value: 900 seconds.
 

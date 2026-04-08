@@ -16,6 +16,7 @@ from collections.abc import Callable
 from typing import Any, overload
 
 import pydantic
+from redis.exceptions import LockError
 
 from lambda_tasks.models import SQSLambdaTask, SQSLambdaTaskMessage
 from lambda_tasks.settings import MAX_TIMEOUT, LambdaTasksSettings
@@ -71,6 +72,7 @@ class LambdaTaskWrapper:
         queue: str = "default",
         ignore_errors: tuple[type[BaseException], ...] = (),
         retry_on: tuple[type[BaseException], ...] = (),
+        singleton: bool = False,
     ) -> None:
         self._validate_func(func=func)
         self._validate_timeouts(soft_timeout=soft_timeout, hard_timeout=hard_timeout)
@@ -79,6 +81,7 @@ class LambdaTaskWrapper:
         self._validate_ignore_errors(ignore_errors=ignore_errors)
         self._validate_retry_on(retry_on=retry_on)
         self._validate_no_overlap(retry_on=retry_on, ignore_errors=ignore_errors)
+        self._validate_singleton(singleton=singleton, retry_on=retry_on)
 
         functools.update_wrapper(self, func)
 
@@ -90,6 +93,7 @@ class LambdaTaskWrapper:
         self._queue = queue
         self._ignore_errors = ignore_errors
         self._retry_on = retry_on
+        self._singleton = singleton
         self._kwargs_model: type[pydantic.BaseModel] = _build_kwargs_model(func)
 
     @property
@@ -236,6 +240,11 @@ class LambdaTaskWrapper:
         """Exception types that trigger an automatic retry."""
         return self._retry_on
 
+    @property
+    def singleton(self) -> bool:
+        """Whether this task enforces single-concurrency via a Redis lock."""
+        return self._singleton
+
     @staticmethod
     def _validate_delay(*, delay: int) -> None:
         """Raise ValueError if delay is outside the allowed range [0, 900]."""
@@ -320,6 +329,22 @@ class LambdaTaskWrapper:
                     f"hard_timeout ({hard_timeout})."
                 )
 
+    @staticmethod
+    def _validate_singleton(
+        *,
+        singleton: bool,
+        retry_on: tuple[type[BaseException], ...],
+    ) -> None:
+        """Raise TypeError if singleton=True and LockError is in retry_on."""
+        if singleton:
+            for exc_type in retry_on:
+                if issubclass(exc_type, LockError) or issubclass(LockError, exc_type):
+                    raise TypeError(
+                        f"retry_on must not include LockError (or a superclass of it) "
+                        f"when singleton=True — LockError is retried automatically. "
+                        f"Got {exc_type.__name__!r}."
+                    )
+
 
 @overload
 def lambda_task(
@@ -332,6 +357,7 @@ def lambda_task(
     queue: str = ...,
     ignore_errors: tuple[type[BaseException], ...] = ...,
     retry_on: tuple[type[BaseException], ...] = ...,
+    singleton: bool = ...,
 ) -> LambdaTaskWrapper: ...
 
 
@@ -346,6 +372,7 @@ def lambda_task(
     queue: str = ...,
     ignore_errors: tuple[type[BaseException], ...] = ...,
     retry_on: tuple[type[BaseException], ...] = ...,
+    singleton: bool = ...,
 ) -> Callable[[types.FunctionType], LambdaTaskWrapper]: ...
 
 
@@ -359,6 +386,7 @@ def lambda_task(
     queue: str = "default",
     ignore_errors: tuple[type[BaseException], ...] = (),
     retry_on: tuple[type[BaseException], ...] = (),
+    singleton: bool = False,
 ) -> LambdaTaskWrapper | Callable[[types.FunctionType], LambdaTaskWrapper]:
     """Decorator factory that registers a function as a background task.
 
@@ -381,6 +409,7 @@ def lambda_task(
             queue=queue,
             ignore_errors=ignore_errors,
             retry_on=retry_on,
+            singleton=singleton,
         )
         return wrapper
 

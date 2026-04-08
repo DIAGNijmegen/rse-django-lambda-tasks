@@ -36,3 +36,7 @@ class LambdaTasksSettings:
     @property
     def MAX_RETRIES(self) -> int:
         return int(getattr(django_settings, "LAMBDA_TASKS_MAX_RETRIES", 2880))
+
+    @property
+    def SINGLETON_CACHE(self) -> str:
+        return str(getattr(django_settings, "LAMBDA_TASKS_SINGLETON_CACHE", "default"))

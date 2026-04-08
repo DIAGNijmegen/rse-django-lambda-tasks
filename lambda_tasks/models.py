@@ -1,17 +1,20 @@
 """Django model for persisting task execution records."""
 
+import contextlib
 import datetime
 import random
 import traceback
 import uuid
 
 import boto3
+from django.core.cache import caches
 from django.core.exceptions import ImproperlyConfigured
 from django.db import models, transaction
 from django.db.models import Q
 from django.utils.module_loading import import_string
 from django.utils.timezone import now
 from pydantic import BaseModel, ConfigDict, Field
+from redis.exceptions import LockError
 
 from lambda_tasks.logging import task_logger
 from lambda_tasks.settings import LambdaTasksSettings
@@ -128,17 +131,33 @@ class SQSLambdaTaskMessage(BaseModel):
             ignored_traceback: str | None = None
             result = None
 
+            if wrapper.singleton:
+                cache = caches[LambdaTasksSettings().SINGLETON_CACHE]
+                lock_key = f"lambda_tasks.singleton_lock.{self.task_name}"
+                lock_ctx: contextlib.AbstractContextManager = (
+                    cache.lock(  # ty: ignore[assignment]
+                        lock_key,
+                        blocking_timeout=0,
+                        timeout=hard_timeout,
+                    )
+                )
+                effective_retry_on = (LockError, *wrapper.retry_on)
+            else:
+                lock_ctx = contextlib.nullcontext()
+                effective_retry_on = wrapper.retry_on
+
             try:
-                with transaction.atomic():
-                    with TimeoutContext(
-                        soft_timeout=soft_timeout, hard_timeout=hard_timeout
-                    ):
-                        result = wrapper(**self.kwargs)
+                with lock_ctx:
+                    with transaction.atomic():
+                        with TimeoutContext(
+                            soft_timeout=soft_timeout, hard_timeout=hard_timeout
+                        ):
+                            result = wrapper(**self.kwargs)
             except Exception as error:
                 if wrapper.ignore_errors and isinstance(error, wrapper.ignore_errors):
                     ignored_exception = error
                     ignored_traceback = traceback.format_exc()
-                elif wrapper.retry_on and isinstance(error, wrapper.retry_on):
+                elif effective_retry_on and isinstance(error, effective_retry_on):
                     conf = LambdaTasksSettings()
                     if self.n_retries >= conf.MAX_RETRIES:
                         record.status = TaskRecord.TaskStatus.FAILED
@@ -163,10 +182,8 @@ class SQSLambdaTaskMessage(BaseModel):
                             f"Retrying (due to {type(ignored_exception).__name__}) after {record.duration}"
                         )
 
-                        delay = (
-                            wrapper.retry_delay
-                            if wrapper.retry_delay != 0
-                            else round(random.uniform(1, 5))
+                        delay = min(
+                            wrapper.retry_delay + round(random.uniform(1, 5)), 900
                         )
 
                         retry_task = SQSLambdaTask(

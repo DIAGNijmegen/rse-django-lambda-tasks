@@ -16,9 +16,12 @@ from datetime import datetime
 import pytest
 from django.db import IntegrityError
 from django.utils.timezone import now
+from redis.exceptions import LockError
 
 from lambda_tasks.decorators import lambda_task
-from lambda_tasks.models import SQSLambdaTaskMessage, TaskRecord
+from lambda_tasks.models import SQSLambdaTask, SQSLambdaTaskMessage, TaskRecord
+from lambda_tasks.settings import LambdaTasksSettings
+from lambda_tasks.timeouts import SoftTimeLimitExceeded
 
 # ---------------------------------------------------------------------------
 # TaskRecord model — field, constraint, and ORM tests
@@ -1543,7 +1546,8 @@ def test_property_retry_delay_nonzero_used_in_retry_enqueue(retry_delay):
                 msg.execute_immediately(message_id=str(uuid.uuid4()))
 
     assert len(captured_tasks) == 1
-    assert captured_tasks[0].delay == retry_delay
+    assert captured_tasks[0].delay >= min(retry_delay + 1, 900)
+    assert captured_tasks[0].delay <= min(retry_delay + 5, 900)
 
 
 # Feature: retry-delay, Property 5: zero retry_delay produces jitter in [1, 5]
@@ -1631,3 +1635,433 @@ def test_passing_delay_to_execute_on_commit_raises_validation_error():
 
     with pytest.raises(ValidationError):
         _task_simple.execute_on_commit(x=1, _delay=5)
+
+
+# ---------------------------------------------------------------------------
+# Feature: singleton-task — module-level task helper for lock key format test
+# ---------------------------------------------------------------------------
+
+
+@lambda_task(singleton=True)
+def _task_singleton_noop(*, x: int) -> int:
+    """Singleton task that returns x — used by singleton lock key property test."""
+    return x
+
+
+# ---------------------------------------------------------------------------
+# Feature: singleton-task, Property 2: Lock key format
+# ---------------------------------------------------------------------------
+
+
+# Task name strategy: dotted module paths like "myapp.tasks.do_work"
+_task_name_segment_st = st.text(
+    min_size=1,
+    max_size=30,
+    alphabet=st.characters(
+        whitelist_categories=("Ll", "Lu", "Nd"), whitelist_characters="_"
+    ),
+)
+_task_name_st = st.builds(
+    lambda segments: ".".join(segments),
+    segments=st.lists(_task_name_segment_st, min_size=1, max_size=5),
+)
+
+
+@pytest.mark.django_db(transaction=True)
+@given(task_name=_task_name_st)
+@h_settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+def test_property_singleton_lock_key_format(task_name: str) -> None:
+    """Feature: singleton-task, Property 2: Lock key format
+
+    For any task name string, when a singleton task is executed, the executor
+    should attempt to acquire a lock with key `lambda_tasks.singleton_lock.{task_name}`.
+
+    **Validates: Requirements 2.1**
+    """
+    msg = SQSLambdaTaskMessage(
+        task_name=task_name,
+        kwargs={"x": 1},
+        n_retries=0,
+    )
+    message_id = str(uuid.uuid4())
+
+    mock_lock = MagicMock()
+    mock_lock.__enter__ = MagicMock(return_value=mock_lock)
+    mock_lock.__exit__ = MagicMock(return_value=False)
+
+    mock_cache = MagicMock()
+    mock_cache.lock.return_value = mock_lock
+
+    with (
+        patch("lambda_tasks.models.import_string", return_value=_task_singleton_noop),
+        patch("lambda_tasks.models.TimeoutContext"),
+        patch(
+            "lambda_tasks.models.caches",
+            {LambdaTasksSettings().SINGLETON_CACHE: mock_cache},
+        ),
+    ):
+        msg.execute_immediately(message_id=message_id)
+
+    expected_key = f"lambda_tasks.singleton_lock.{task_name}"
+    _, hard_timeout = _task_singleton_noop.resolved_timeouts
+    mock_cache.lock.assert_called_once_with(
+        expected_key,
+        blocking_timeout=0,
+        timeout=hard_timeout,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Feature: singleton-task — module-level task helper for lock release failure scenario
+# ---------------------------------------------------------------------------
+
+
+@lambda_task(singleton=True)
+def _task_singleton_raises(*, x: int) -> None:
+    """Singleton task that always raises — used by lock release property test."""
+    raise RuntimeError(f"singleton failure {x}")
+
+
+# ---------------------------------------------------------------------------
+# Feature: singleton-task, Property 3: Lock release on success and failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db(transaction=True)
+@given(
+    x=st.integers(min_value=0, max_value=1000),
+    should_succeed=st.booleans(),
+)
+@h_settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+def test_property_singleton_lock_release_on_success_and_failure(
+    *,
+    x: int,
+    should_succeed: bool,
+) -> None:
+    """Feature: singleton-task, Property 3: Lock release on success and failure
+
+    For any singleton task execution that either succeeds or raises an exception
+    (other than LockError), the lock context manager should be properly exited
+    (lock released).
+
+    **Validates: Requirements 2.2, 2.3**
+    """
+    wrapper = _task_singleton_noop if should_succeed else _task_singleton_raises
+
+    msg = SQSLambdaTaskMessage(
+        task_name=_task_name(wrapper),
+        kwargs={"x": x},
+        n_retries=0,
+    )
+    message_id = str(uuid.uuid4())
+
+    mock_lock = MagicMock()
+    mock_lock.__enter__ = MagicMock(return_value=mock_lock)
+    mock_lock.__exit__ = MagicMock(return_value=False)
+
+    mock_cache = MagicMock()
+    mock_cache.lock.return_value = mock_lock
+
+    with (
+        patch("lambda_tasks.models.import_string", return_value=wrapper),
+        patch("lambda_tasks.models.TimeoutContext"),
+        patch(
+            "lambda_tasks.models.caches",
+            {LambdaTasksSettings().SINGLETON_CACHE: mock_cache},
+        ),
+    ):
+        msg.execute_immediately(message_id=message_id)
+
+    # Lock context manager __exit__ must have been called regardless of outcome
+    mock_lock.__exit__.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Feature: singleton-task, Property 4: LockError triggers retry with RETRYING status and incremented n_retries
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db(transaction=True)
+@given(
+    n_retries=st.integers(min_value=0, max_value=2879),
+)
+@h_settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+def test_property_singleton_lockerror_retry(
+    *,
+    n_retries: int,
+) -> None:
+    """Feature: singleton-task, Property 4: LockError triggers retry with RETRYING status and incremented n_retries
+
+    For any singleton task where LockError is raised and n_retries < MAX_RETRIES,
+    the executor should set the TaskRecord status to RETRYING, record a traceback
+    containing "LockError", and re-enqueue the task with n_retries + 1.
+
+    **Validates: Requirements 3.1, 3.3**
+    """
+    msg = SQSLambdaTaskMessage(
+        task_name=_task_name(_task_singleton_noop),
+        kwargs={"x": 1},
+        n_retries=n_retries,
+    )
+    message_id = str(uuid.uuid4())
+
+    mock_lock = MagicMock()
+    mock_lock.__enter__ = MagicMock(side_effect=LockError("lock contention"))
+    mock_lock.__exit__ = MagicMock(return_value=False)
+
+    mock_cache = MagicMock()
+    mock_cache.lock.return_value = mock_lock
+
+    captured_tasks: list[SQSLambdaTask] = []
+
+    def capturing_execute_on_commit(self: SQSLambdaTask) -> None:
+        captured_tasks.append(self)
+
+    with (
+        patch("lambda_tasks.models.import_string", return_value=_task_singleton_noop),
+        patch("lambda_tasks.models.TimeoutContext"),
+        patch(
+            "lambda_tasks.models.caches",
+            {LambdaTasksSettings().SINGLETON_CACHE: mock_cache},
+        ),
+        patch.object(SQSLambdaTask, "execute_on_commit", capturing_execute_on_commit),
+    ):
+        msg.execute_immediately(message_id=message_id)
+
+    # TaskRecord should be RETRYING with LockError in traceback
+    record = TaskRecord.objects.get(pk=message_id)
+    assert record.status == TaskRecord.TaskStatus.RETRYING
+    assert record.traceback is not None
+    assert "LockError" in record.traceback
+
+    # A retry task should have been enqueued with n_retries + 1
+    assert len(captured_tasks) == 1
+    assert captured_tasks[0].message.n_retries == n_retries + 1
+
+
+# ---------------------------------------------------------------------------
+# Feature: singleton-task, Property 5: LockError at MAX_RETRIES raises MaxRetriesExceededError
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db(transaction=True)
+@given(
+    n_retries=st.integers(min_value=2880, max_value=32767),
+)
+@h_settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+def test_property_singleton_lockerror_max_retries(
+    *,
+    n_retries: int,
+) -> None:
+    """Feature: singleton-task, Property 5: LockError at MAX_RETRIES raises MaxRetriesExceededError
+
+    For any singleton task where LockError is raised and n_retries >= MAX_RETRIES,
+    the executor should raise MaxRetriesExceededError and record the TaskRecord
+    as FAILED with a non-null traceback.
+
+    **Validates: Requirements 3.2**
+    """
+    msg = SQSLambdaTaskMessage(
+        task_name=_task_name(_task_singleton_noop),
+        kwargs={"x": 1},
+        n_retries=n_retries,
+    )
+    message_id = str(uuid.uuid4())
+
+    mock_lock = MagicMock()
+    mock_lock.__enter__ = MagicMock(side_effect=LockError("lock contention"))
+    mock_lock.__exit__ = MagicMock(return_value=False)
+
+    mock_cache = MagicMock()
+    mock_cache.lock.return_value = mock_lock
+
+    with (
+        patch("lambda_tasks.models.import_string", return_value=_task_singleton_noop),
+        patch("lambda_tasks.models.TimeoutContext"),
+        patch(
+            "lambda_tasks.models.caches",
+            {LambdaTasksSettings().SINGLETON_CACHE: mock_cache},
+        ),
+        patch.object(SQSLambdaTask, "execute_on_commit") as mock_eoc,
+    ):
+        with pytest.raises(MaxRetriesExceededError):
+            msg.execute_immediately(message_id=message_id)
+
+    # No retry should have been enqueued
+    mock_eoc.assert_not_called()
+
+    # TaskRecord should be FAILED with non-null traceback
+    record = TaskRecord.objects.get(pk=message_id)
+    assert record.status == TaskRecord.TaskStatus.FAILED
+    assert record.traceback is not None
+
+
+# ---------------------------------------------------------------------------
+# Feature: singleton-task — Task 4.6: Unit tests for singleton execution
+# ---------------------------------------------------------------------------
+
+
+@lambda_task
+def _task_non_singleton_noop(*, x: int) -> int:
+    """Non-singleton task — used to verify no lock is acquired."""
+    return x
+
+
+@pytest.mark.django_db(transaction=True)
+class TestSingletonExecutionUnit:
+    def test_singleton_false_does_not_acquire_lock(self) -> None:
+        """singleton=False → no cache.lock() call is made.
+        Requirements: 1.3"""
+        msg = SQSLambdaTaskMessage(
+            task_name=_task_name(_task_non_singleton_noop),
+            kwargs={"x": 42},
+            n_retries=0,
+        )
+        message_id = str(uuid.uuid4())
+
+        mock_cache = MagicMock()
+
+        with (
+            patch(
+                "lambda_tasks.models.import_string",
+                return_value=_task_non_singleton_noop,
+            ),
+            patch("lambda_tasks.models.TimeoutContext"),
+            patch("lambda_tasks.models.caches", {"default": mock_cache}),
+        ):
+            msg.execute_immediately(message_id=message_id)
+
+        mock_cache.lock.assert_not_called()
+
+        record = TaskRecord.objects.get(pk=message_id)
+        assert record.status == TaskRecord.TaskStatus.SUCCESS
+        assert record.result == 42
+
+    def test_singleton_uses_singleton_cache_backend(self, settings: object) -> None:
+        """Executor uses caches[SINGLETON_CACHE] for lock acquisition.
+        Requirements: 4.2"""
+        settings.LAMBDA_TASKS_SINGLETON_CACHE = "my_redis"  # type: ignore[attr-defined]
+
+        msg = SQSLambdaTaskMessage(
+            task_name=_task_name(_task_singleton_noop),
+            kwargs={"x": 7},
+            n_retries=0,
+        )
+        message_id = str(uuid.uuid4())
+
+        mock_lock = MagicMock()
+        mock_lock.__enter__ = MagicMock(return_value=mock_lock)
+        mock_lock.__exit__ = MagicMock(return_value=False)
+
+        mock_cache = MagicMock()
+        mock_cache.lock.return_value = mock_lock
+
+        # Only provide the custom cache key — if executor looks up the wrong key it will KeyError
+        with (
+            patch(
+                "lambda_tasks.models.import_string", return_value=_task_singleton_noop
+            ),
+            patch("lambda_tasks.models.TimeoutContext"),
+            patch("lambda_tasks.models.caches", {"my_redis": mock_cache}),
+        ):
+            msg.execute_immediately(message_id=message_id)
+
+        mock_cache.lock.assert_called_once()
+
+    def test_sqs_lambda_task_message_schema_excludes_singleton(self) -> None:
+        """SQSLambdaTaskMessage model fields do not include 'singleton'.
+        Requirements: 5.1"""
+        assert "singleton" not in SQSLambdaTaskMessage.model_fields
+
+
+# ---------------------------------------------------------------------------
+# Feature: singleton-task — ignore_errors precedence over implicit retry_on
+# ---------------------------------------------------------------------------
+
+
+@lambda_task(singleton=True, ignore_errors=(LockError,))
+def _task_singleton_ignore_lock_error(*, x: int) -> int:
+    return x
+
+
+@lambda_task(singleton=True, ignore_errors=(SoftTimeLimitExceeded,))
+def _task_singleton_ignore_soft_timeout(*, x: int) -> int:
+    raise SoftTimeLimitExceeded()
+
+
+@pytest.mark.django_db(transaction=True)
+class TestSingletonIgnoreErrorsPrecedence:
+    """Verify that ignore_errors takes precedence over the implicit LockError
+    retry added by singleton=True, and over SoftTimeLimitExceeded."""
+
+    def test_ignored_lock_error_produces_success_not_retry(self) -> None:
+        """LockError in ignore_errors → SUCCESS with traceback, not RETRYING."""
+        msg = SQSLambdaTaskMessage(
+            task_name=_task_name(_task_singleton_ignore_lock_error),
+            kwargs={"x": 1},
+            n_retries=0,
+        )
+        message_id = str(uuid.uuid4())
+
+        mock_lock = MagicMock()
+        mock_lock.__enter__ = MagicMock(side_effect=LockError("contention"))
+        mock_lock.__exit__ = MagicMock(return_value=False)
+
+        mock_cache = MagicMock()
+        mock_cache.lock.return_value = mock_lock
+
+        with (
+            patch(
+                "lambda_tasks.models.import_string",
+                return_value=_task_singleton_ignore_lock_error,
+            ),
+            patch("lambda_tasks.models.TimeoutContext"),
+            patch(
+                "lambda_tasks.models.caches",
+                {LambdaTasksSettings().SINGLETON_CACHE: mock_cache},
+            ),
+            patch.object(SQSLambdaTask, "execute_on_commit") as mock_eoc,
+        ):
+            msg.execute_immediately(message_id=message_id)
+
+        record = TaskRecord.objects.get(pk=message_id)
+        assert record.status == TaskRecord.TaskStatus.SUCCESS
+        assert record.traceback is not None
+        assert "LockError" in record.traceback
+        mock_eoc.assert_not_called()
+
+    def test_ignored_soft_timeout_produces_success_not_retry(self) -> None:
+        """SoftTimeLimitExceeded in ignore_errors → SUCCESS with traceback, not RETRYING."""
+        msg = SQSLambdaTaskMessage(
+            task_name=_task_name(_task_singleton_ignore_soft_timeout),
+            kwargs={"x": 1},
+            n_retries=0,
+        )
+        message_id = str(uuid.uuid4())
+
+        mock_lock = MagicMock()
+        mock_lock.__enter__ = MagicMock(return_value=mock_lock)
+        mock_lock.__exit__ = MagicMock(return_value=False)
+
+        mock_cache = MagicMock()
+        mock_cache.lock.return_value = mock_lock
+
+        with (
+            patch(
+                "lambda_tasks.models.import_string",
+                return_value=_task_singleton_ignore_soft_timeout,
+            ),
+            patch("lambda_tasks.models.TimeoutContext"),
+            patch(
+                "lambda_tasks.models.caches",
+                {LambdaTasksSettings().SINGLETON_CACHE: mock_cache},
+            ),
+            patch.object(SQSLambdaTask, "execute_on_commit") as mock_eoc,
+        ):
+            msg.execute_immediately(message_id=message_id)
+
+        record = TaskRecord.objects.get(pk=message_id)
+        assert record.status == TaskRecord.TaskStatus.SUCCESS
+        assert record.traceback is not None
+        assert "SoftTimeLimitExceeded" in record.traceback
+        mock_eoc.assert_not_called()
