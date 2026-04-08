@@ -179,7 +179,7 @@ class SQSLambdaTaskMessage(BaseModel):
                         record.save(update_fields=["status", "traceback", "end_time"])
 
                         task_logger.warning(
-                            f"Retrying (due to {type(ignored_exception).__name__}) after {record.duration}"
+                            f"Retrying (due to {type(error).__name__}) after {record.duration}"
                         )
 
                         delay = min(

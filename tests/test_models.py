@@ -1385,6 +1385,31 @@ def test_property_6_retrying_status_and_traceback(exc_type_name):
 
 
 @pytest.mark.django_db(transaction=True)
+@given(exc_type_name=st.sampled_from(["ValueError", "RuntimeError"]))
+@h_settings(max_examples=10, suppress_health_check=[HealthCheck.too_slow])
+def test_retry_log_message_contains_exception_type(exc_type_name):
+    """Retry log message must reference the actual exception type, not None."""
+    msg = SQSLambdaTaskMessage(
+        task_name=_task_name(_task_retry_raises),
+        kwargs={"exc_type_name": exc_type_name},
+        n_retries=0,
+    )
+    message_id = str(uuid.uuid4())
+    with patch("lambda_tasks.models.import_string", return_value=_task_retry_raises):
+        with patch("lambda_tasks.models.TimeoutContext"):
+            with patch.object(SQSLambdaTask, "execute_on_commit"):
+                with patch("lambda_tasks.models.task_logger") as mock_logger:
+                    msg.execute_immediately(message_id=message_id)
+
+    retry_warnings = [
+        call for call in mock_logger.warning.call_args_list if "Retrying" in str(call)
+    ]
+    assert len(retry_warnings) == 1
+    log_msg = str(retry_warnings[0])
+    assert exc_type_name in log_msg
+
+
+@pytest.mark.django_db(transaction=True)
 @given(exc_type_name=st.sampled_from(["TypeError", "KeyError", "AttributeError"]))
 @h_settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
 def test_property_7_non_matching_exc_fails_no_retry(exc_type_name):
