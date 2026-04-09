@@ -162,24 +162,6 @@ def my_task(*, arg: str) -> None:
 
 ---
 
-## Per-invocation overrides
-
-Pass override kwargs prefixed with `_` to `.execute_on_commit()` to customise a single invocation:
-
-```python
-send_welcome_email.execute_on_commit(
-    user_id=42,
-    template="welcome",
-    _delay=30,           # SQS message visibility delay in seconds
-)
-```
-
-| Override | Type | Description |
-|---|---|---|
-| `_delay` | `int` | SQS message delay in seconds before the worker can pick it up. |
-
----
-
 ## Serializing a task invocation
 
 `serialize()` builds and validates a task invocation the same way `execute_on_commit()` does, but returns the payload as a plain dict instead of enqueuing it. Useful when you need to inspect, store, or forward the message before deciding to send it.
