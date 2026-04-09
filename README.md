@@ -178,8 +178,6 @@ payload = send_welcome_email.serialize(user_id=42, template="welcome")
 # }
 ```
 
-Per-invocation overrides (`_delay`) are accepted the same way as in `execute_on_commit()`.
-
 The returned dict matches the `SQSLambdaTask` schema. To reconstruct and enqueue it later:
 
 ```python
