@@ -43,8 +43,7 @@ def handler(*, event: dict, context: object) -> dict:
             ).execute_immediately(message_id=record["messageId"])
         except Exception:
             logger.error(
-                "Failed to process SQS record %s",
-                record.get("messageId"),
+                "Failed to process SQS record",
                 exc_info=True,
             )
             batch_item_failures.append({"itemIdentifier": record["messageId"]})

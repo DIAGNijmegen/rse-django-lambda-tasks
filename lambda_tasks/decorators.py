@@ -101,7 +101,9 @@ class LambdaTaskWrapper:
         """Return (soft_timeout, hard_timeout) resolved against settings defaults.
 
         Merges decorator-supplied values with settings defaults, then validates
-        the final pair. Result is cached after first access.
+        the final pair.  Each resolved value must be greater than zero and at
+        most ``MAX_TIMEOUT`` (900), and ``soft_timeout`` must be strictly less
+        than ``hard_timeout``.  Result is cached after first access.
         """
         try:
             return self._resolved_timeouts_cache
@@ -120,11 +122,15 @@ class LambdaTaskWrapper:
             else conf.DEFAULT_HARD_TIMEOUT
         )
 
-        # Validate settings-sourced values against the cap (decorator values are checked at decoration time)
+        # Validate settings-sourced values (decorator values are already checked at decoration time)
         for name, value, source in (
             ("soft_timeout", soft, self._soft_timeout),
             ("hard_timeout", hard, self._hard_timeout),
         ):
+            if source is None and value <= 0:
+                raise ValueError(
+                    f"{name} ({value}) from settings must be greater than zero."
+                )
             if source is None and value > MAX_TIMEOUT:
                 raise ValueError(
                     f"{name} ({value}) from settings exceeds the maximum allowed value of {MAX_TIMEOUT} seconds."
@@ -313,15 +319,23 @@ class LambdaTaskWrapper:
     def _validate_timeouts(
         *, soft_timeout: int | None, hard_timeout: int | None
     ) -> None:
-        """Raise ValueError if any timeout exceeds 900s or soft_timeout >= hard_timeout."""
+        """Raise ValueError if any timeout is not in (0, 900] or soft_timeout >= hard_timeout.
+
+        Each timeout, when supplied, must be greater than zero and at most
+        ``MAX_TIMEOUT`` (900).  When both are supplied, ``soft_timeout`` must
+        be strictly less than ``hard_timeout``.
+        """
         for name, value in (
             ("soft_timeout", soft_timeout),
             ("hard_timeout", hard_timeout),
         ):
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} ({value}) must be greater than zero.")
             if value is not None and value > MAX_TIMEOUT:
                 raise ValueError(
                     f"{name} ({value}) exceeds the maximum allowed value of {MAX_TIMEOUT} seconds."
                 )
+
         if soft_timeout is not None and hard_timeout is not None:
             if soft_timeout >= hard_timeout:
                 raise ValueError(

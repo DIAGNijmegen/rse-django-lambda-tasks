@@ -178,7 +178,7 @@ Statuses: `RUNNING`, `SUCCESS`, `FAILED`, `RETRYING`
 | `LAMBDA_TASKS_MAX_RETRIES` | `2880` | Maximum retry attempts before `MaxRetriesExceededError` is raised (60 × 24 × 2) |
 | `LAMBDA_TASKS_SINGLETON_CACHE` | `"default"` | Django cache backend used for singleton task locks |
 
-`LAMBDA_TASKS_QUEUES` must be set and include a `"default"` key. `soft_timeout` must always be strictly less than `hard_timeout`.
+`LAMBDA_TASKS_QUEUES` must be set and include a `"default"` key. Both timeout values must be greater than zero and at most `900` seconds. `soft_timeout` must always be strictly less than `hard_timeout`.
 
 ## Eager Mode
 
