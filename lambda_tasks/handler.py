@@ -26,10 +26,11 @@ if os.environ.get("DJANGO_SETTINGS_MODULE") and not apps.ready:
 logger = logging.getLogger(__name__)
 
 
-def handler(*, event: dict, context: object) -> dict:
+def handler(event: dict, context: object) -> dict:
     """AWS Lambda entry point. Processes a batch of SQS records.
 
     Returns a partial-batch failure report so AWS only re-drives failed records.
+    Signature is fixed by AWS and uses two args only.
     """
     # Local import due to AppRegistryNotReady
     from lambda_tasks.models import SQSLambdaTaskMessage
