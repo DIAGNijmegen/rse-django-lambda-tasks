@@ -14,6 +14,7 @@ Feature: django-lambda-tasks, Property 11: Batch records are processed independe
 Validates: Requirements 4.2, 4.3, 4.5
 """
 
+import inspect
 import json
 import uuid
 from unittest.mock import MagicMock, patch
@@ -23,6 +24,30 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from lambda_tasks.handler import handler
+
+# ---------------------------------------------------------------------------
+# Signature test
+# ---------------------------------------------------------------------------
+
+
+class TestHandlerSignature:
+    def test_handler_accepts_event_dict_and_context_object(self):
+        """handler signature must be (event: dict, context: object) — the Lambda runtime contract."""
+        sig = inspect.signature(handler)
+        params = list(sig.parameters.values())
+
+        assert len(params) == 2, f"Expected 2 parameters, got {len(params)}: {params}"
+
+        event_param = params[0]
+        assert event_param.name == "event"
+        assert event_param.annotation is dict
+        assert event_param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+
+        context_param = params[1]
+        assert context_param.name == "context"
+        assert context_param.annotation is object
+        assert context_param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+
 
 # ---------------------------------------------------------------------------
 # Helpers
