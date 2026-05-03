@@ -135,11 +135,26 @@ class SQSLambdaTaskMessage(BaseModel):
 - Returns `{"batchItemFailures": [...]}` for partial-batch failure reporting
 - Only pre-execution failures (malformed message, import error, misconfiguration) are reported as `batchItemFailures` — task logic failures are caught and recorded as `FAILED` TaskRecords without raising
 - Recommended SQS queue settings: `maxReceiveCount=1` with a DLQ configured; automatic retries are not useful since task failures are not re-driven by design
-- Calls `resolve_secrets_into_env()` before `django.setup()` at cold start to populate env vars from AWS Secrets Manager
+- Cold-start sequence: `resolve_ssm_environment()` → `resolve_secrets_into_env()` → conditional `django.setup()`
+- Both loaders run unconditionally (outside the `DJANGO_SETTINGS_MODULE` check) — SSM may provide that var, and secrets may depend on SSM-loaded vars
+
+## SSM Environment Loader
+
+`resolve_ssm_environment()` in `ssm_environment_loader.py` runs once at Lambda cold start, before `resolve_secrets_into_env()` and `django.setup()`.
+
+When the environment variable `LAMBDA_TASKS_SSM_ENVIRONMENT` is set, the loader fetches the named SSM parameter, parses its JSON content as a flat key-value mapping, and sets the resulting pairs as environment variables.
+
+Behaviour:
+- If `LAMBDA_TASKS_SSM_ENVIRONMENT` is not set, does nothing (no AWS API calls)
+- Fetches the parameter with `WithDecryption=True`
+- Validates the parameter value is a flat JSON object (all values must be strings, no empty keys)
+- Sets each key-value pair in `os.environ` — existing env vars are overridden (no conflict detection)
+- Idempotent via a module-level `_loaded` sentinel — subsequent calls are free no-ops
+- Invalid JSON, non-flat objects, or empty keys raise `ValueError` at cold start
 
 ## Secret Loader
 
-`resolve_secrets_into_env()` in `secret_loader.py` runs once at Lambda cold start, before `django.setup()`.
+`resolve_secrets_into_env()` in `secret_loader.py` runs once at Lambda cold start, after `resolve_ssm_environment()` and before `django.setup()`.
 
 Any env var prefixed `LAMBDA_TASKS_SECRET_` is treated as a Secrets Manager reference. The unprefixed name is the target env var.
 

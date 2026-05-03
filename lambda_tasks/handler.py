@@ -13,13 +13,15 @@ import django
 from django.apps import apps
 
 from lambda_tasks.secret_loader import resolve_secrets_into_env
+from lambda_tasks.ssm_environment_loader import resolve_ssm_environment
 
-# Cold-start Django setup — runs once per Lambda container.
-# Secrets are resolved first so Django settings can reference the populated
-# env vars. resolve_secrets_into_env() is idempotent and caches fetched
-# secrets in-process, so subsequent invocations pay no extra cost.
+# Both loaders are idempotent and run unconditionally before the
+# DJANGO_SETTINGS_MODULE check — SSM may provide that var, and
+# secrets may depend on SSM-loaded vars.
+resolve_ssm_environment()
+resolve_secrets_into_env()
+
 if os.environ.get("DJANGO_SETTINGS_MODULE") and not apps.ready:
-    resolve_secrets_into_env()
     django.setup()
 
 

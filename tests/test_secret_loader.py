@@ -30,10 +30,12 @@ VALID_REF2 = f"{ARN2}:OTHER_KEY:AWSCURRENT:AWSCURRENT"
 
 @pytest.fixture(autouse=True)
 def clear_cache():
-    """Reset the module-level secret cache between every test."""
+    """Reset the module-level secret cache and _loaded sentinel between every test."""
     secret_loader._secret_cache.clear()
+    secret_loader._loaded = False
     yield
     secret_loader._secret_cache.clear()
+    secret_loader._loaded = False
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +289,7 @@ class TestBatching:
 
 
 class TestCaching:
-    def test_second_call_makes_no_api_call(self, monkeypatch):
+    def test_second_call_is_noop_due_to_loaded_sentinel(self, monkeypatch):
         monkeypatch.setenv("LAMBDA_TASKS_SECRET_MY_VAR", VALID_REF)
         monkeypatch.delenv("MY_VAR", raising=False)
 
@@ -297,11 +299,20 @@ class TestCaching:
 
         with patch("lambda_tasks.secret_loader.boto3") as mock_boto3:
             mock_boto3.client.return_value = client
-            resolve_secrets_into_env()  # first call — fetches
-            monkeypatch.delenv("MY_VAR")  # reset so second call tries again
-            resolve_secrets_into_env()  # second call — should use cache
+            resolve_secrets_into_env()  # first call — fetches and sets _loaded
+            resolve_secrets_into_env()  # second call — returns immediately
 
         client.get_secret_value.assert_called_once()
+
+    def test_no_boto3_client_created_when_already_loaded(self, monkeypatch):
+        secret_loader._loaded = True
+        monkeypatch.setenv("LAMBDA_TASKS_SECRET_MY_VAR", VALID_REF)
+        monkeypatch.delenv("MY_VAR", raising=False)
+
+        with patch("lambda_tasks.secret_loader.boto3") as mock_boto3:
+            resolve_secrets_into_env()
+
+        mock_boto3.client.assert_not_called()
 
     def test_no_boto3_client_created_when_all_cached(self, monkeypatch):
         secret_loader._secret_cache[(ARN, "AWSCURRENT", "AWSCURRENT")] = {

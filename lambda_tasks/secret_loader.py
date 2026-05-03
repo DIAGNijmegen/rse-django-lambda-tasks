@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 _PREFIX = "LAMBDA_TASKS_SECRET_"
 
+# Module-level sentinel: once resolve_secrets_into_env() completes successfully,
+# subsequent calls return immediately without re-scanning or re-resolving.
+_loaded: bool = False
+
 # Module-level cache: (arn, version_stage, version_id) → raw secret string.
 # Populated on first call; reused for the lifetime of the Lambda container.
 _secret_cache: dict[tuple[str, str, str], dict[str, str]] = {}
@@ -139,8 +143,14 @@ def resolve_secrets_into_env() -> None:
       ``FOO``, not both
 
     This function is idempotent — calling it multiple times is safe and cheap
-    because resolved secrets are cached after the first fetch.
+    because a module-level sentinel prevents re-execution after the first
+    successful call.
     """
+    global _loaded
+
+    if _loaded:
+        return
+
     references: dict[str, _SecretReference] = {}  # target_name → _SecretReference
 
     for key, value in os.environ.items():
@@ -181,3 +191,5 @@ def resolve_secrets_into_env() -> None:
         os.environ[target] = secret_value
 
         logger.info(f"Resolved {target} from secret {ref}")
+
+    _loaded = True

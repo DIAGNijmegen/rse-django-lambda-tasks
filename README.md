@@ -425,6 +425,12 @@ lambda_tasks.handler.handler
 
 Ensure the Lambda execution environment has `DJANGO_SETTINGS_MODULE` set and that all task modules are importable (i.e. your application code is on the Python path).
 
+| Environment Variable | Required | Description |
+|---|---|---|
+| `DJANGO_SETTINGS_MODULE` | Yes | Django settings module path (e.g. `myapp.settings.production`). |
+| `LAMBDA_TASKS_SSM_ENVIRONMENT` | No | SSM Parameter Store parameter name to load as environment variables at cold start. |
+| `LAMBDA_TASKS_SECRET_*` | No | Secrets Manager references resolved into env vars at cold start (see below). |
+
 ### Resolving Django settings from AWS Secrets Manager
 
 The Lambda handler supports loading secret values from AWS Secrets Manager into the environment before Django starts. This lets your Django settings file read from `os.environ` as normal while keeping secrets out of plaintext environment variables.
@@ -474,6 +480,46 @@ The following all raise `ValueError` at cold start, preventing the Lambda contai
 - Both `LAMBDA_TASKS_SECRET_FOO` and `FOO` are set — use one or the other
 - The named JSON key does not exist in the fetched secret
 - The secret value is not valid JSON
+
+### Loading environment variables from SSM Parameter Store
+
+The Lambda handler supports loading environment variables from an AWS SSM Parameter Store parameter at cold start. This lets you manage environment configuration centrally in Parameter Store without baking values into the Lambda deployment package.
+
+Set the `LAMBDA_TASKS_SSM_ENVIRONMENT` environment variable to the name of an SSM parameter:
+
+```
+LAMBDA_TASKS_SSM_ENVIRONMENT=/myapp/prod/environment
+```
+
+The parameter value must be a flat JSON object where all keys and values are strings:
+
+```json
+{
+  "DATABASE_URL": "postgres://user:pass@host:5432/db",
+  "REDIS_URL": "redis://host:6379/0",
+  "DJANGO_SETTINGS_MODULE": "myapp.settings.production"
+}
+```
+
+At cold start, before `resolve_secrets_into_env()` and `django.setup()`, the handler calls `resolve_ssm_environment()` which:
+
+1. Checks for the `LAMBDA_TASKS_SSM_ENVIRONMENT` env var — if not set, does nothing
+2. Fetches the named parameter via `ssm.get_parameter(Name=..., WithDecryption=True)`
+3. Validates the parameter value is a flat JSON object (all values must be strings, no empty keys)
+4. Sets each key-value pair in `os.environ` — existing env vars are overridden
+5. Caches the result via a module-level sentinel — subsequent calls are free no-ops
+
+Because SSM loading runs first, the parameter can provide `DJANGO_SETTINGS_MODULE` itself, and secrets loaded by `resolve_secrets_into_env()` can reference SSM-loaded values.
+
+#### Validation errors
+
+The following raise `ValueError` at cold start, preventing the Lambda container from starting:
+
+- Parameter value is not valid JSON
+- JSON is not a flat object (contains non-string values) — error message lists the offending keys
+- JSON contains an empty string key
+
+AWS errors (parameter not found, permission denied) propagate as boto3 exceptions and crash the container at cold start.
 
 ---
 

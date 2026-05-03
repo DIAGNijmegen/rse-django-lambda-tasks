@@ -18,6 +18,7 @@ django-lambda-tasks/
 │   ├── models.py               # TaskRecord, SQSLambdaTaskMessage, SQSLambdaTask
 │   ├── settings.py             # LambdaTasksSettings (lazy Django settings reader)
 │   ├── secret_loader.py        # Resolves LAMBDA_TASKS_SECRET_* env vars at cold start
+│   ├── ssm_environment_loader.py # Loads env vars from SSM Parameter Store at cold start
 │   ├── tasks.py                # Built-in maintenance tasks (cleanup_task_records)
 │   ├── timeouts.py             # TimeoutContext implementation
 │   └── migrations/             # Django migrations for TaskRecord
@@ -39,8 +40,9 @@ django-lambda-tasks/
 
 - `decorators.py` — defines `@lambda_task`; enforces kwargs-only at decoration time
 - `models.py` — `TaskRecord` (Django ORM), `SQSLambdaTaskMessage` (Pydantic, SQS schema + execution logic), `SQSLambdaTask` (Pydantic, holds message + routing; `_execute()` publishes to SQS or executes eagerly; `execute_on_commit()` registers `_execute` with `transaction.on_commit`)
-- `handler.py` — Lambda entry point; calls `resolve_secrets_into_env()` then `django.setup()` at cold start; processes SQS records independently; returns `batchItemFailures`
-- `secret_loader.py` — resolves `LAMBDA_TASKS_SECRET_*` env vars from Secrets Manager before Django starts; validates format, detects conflicts, batches API calls, caches results in-process
+- `handler.py` — Lambda entry point; calls `resolve_ssm_environment()` then `resolve_secrets_into_env()` then conditionally `django.setup()` at cold start; processes SQS records independently; returns `batchItemFailures`
+- `ssm_environment_loader.py` — loads env vars from an SSM Parameter Store parameter at cold start; validates flat JSON format; idempotent via `_loaded` sentinel
+- `secret_loader.py` — resolves `LAMBDA_TASKS_SECRET_*` env vars from Secrets Manager before Django starts; validates format, detects conflicts, batches API calls; idempotent via `_loaded` sentinel
 - `logging.py` — `task_logger` singleton; `message_id` set/cleared around each task execution
 - `settings.py` — `LambdaTasksSettings` instantiated fresh per use (reads live Django settings)
 - `admin.py` — Django admin registration for `TaskRecord`
