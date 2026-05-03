@@ -7,7 +7,7 @@ packages = ["lambda_tasks"]
 
 [project]
 name = "django-lambda-tasks"
-version = "0.1.6"
+version = "0.2.0"
 description = "Run async tasks in a lambda function"
 readme = "README.md"
 requires-python = ">=3.10"
