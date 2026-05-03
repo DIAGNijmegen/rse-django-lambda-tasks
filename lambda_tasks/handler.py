@@ -12,13 +12,13 @@ import os
 import django
 from django.apps import apps
 
+from lambda_tasks.environment_loader import resolve_environment
 from lambda_tasks.secret_loader import resolve_secrets_into_env
-from lambda_tasks.ssm_environment_loader import resolve_ssm_environment
 
 # Both loaders are idempotent and run unconditionally before the
-# DJANGO_SETTINGS_MODULE check — SSM may provide that var, and
-# secrets may depend on SSM-loaded vars.
-resolve_ssm_environment()
+# DJANGO_SETTINGS_MODULE check — the environment secret may provide
+# that var, and individual secrets may depend on environment-loaded vars.
+resolve_environment()
 resolve_secrets_into_env()
 
 if os.environ.get("DJANGO_SETTINGS_MODULE") and not apps.ready:

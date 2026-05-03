@@ -428,7 +428,7 @@ Ensure the Lambda execution environment has `DJANGO_SETTINGS_MODULE` set and tha
 | Environment Variable | Required | Description |
 |---|---|---|
 | `DJANGO_SETTINGS_MODULE` | Yes | Django settings module path (e.g. `myapp.settings.production`). |
-| `LAMBDA_TASKS_SSM_ENVIRONMENT` | No | SSM Parameter Store parameter name to load as environment variables at cold start. |
+| `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` | No | Secrets Manager reference (`<arn>:<version-stage>:<version-id>`) to load as environment variables at cold start. |
 | `LAMBDA_TASKS_SECRET_*` | No | Secrets Manager references resolved into env vars at cold start (see below). |
 
 ### Resolving Django settings from AWS Secrets Manager
@@ -481,17 +481,19 @@ The following all raise `ValueError` at cold start, preventing the Lambda contai
 - The named JSON key does not exist in the fetched secret
 - The secret value is not valid JSON
 
-### Loading environment variables from SSM Parameter Store
+### Loading environment variables from Secrets Manager
 
-The Lambda handler supports loading environment variables from an AWS SSM Parameter Store parameter at cold start. This lets you manage environment configuration centrally in Parameter Store without baking values into the Lambda deployment package.
+The Lambda handler supports loading environment variables from an AWS Secrets Manager secret at cold start. This lets you manage environment configuration centrally in Secrets Manager without baking values into the Lambda deployment package.
 
-Set the `LAMBDA_TASKS_SSM_ENVIRONMENT` environment variable to the name of an SSM parameter:
+Set the `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` environment variable to a full reference including version stage and version ID:
 
 ```
-LAMBDA_TASKS_SSM_ENVIRONMENT=/myapp/prod/environment
+LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN=arn:aws:secretsmanager:eu-west-1:123456789012:secret:myapp/prod/environment:AWSCURRENT:v1
 ```
 
-The parameter value must be a flat JSON object where all keys and values are strings:
+The format is `<arn>:<version-stage>:<version-id>` (9 colon-separated segments — the ARN is 7 segments, plus version-stage and version-id). Both suffix fields must be non-empty.
+
+The secret value must be a flat JSON object where all keys and values are strings:
 
 ```json
 {
@@ -501,25 +503,27 @@ The parameter value must be a flat JSON object where all keys and values are str
 }
 ```
 
-At cold start, before `resolve_secrets_into_env()` and `django.setup()`, the handler calls `resolve_ssm_environment()` which:
+At cold start, before `resolve_secrets_into_env()` and `django.setup()`, the handler calls `resolve_environment()` which:
 
-1. Checks for the `LAMBDA_TASKS_SSM_ENVIRONMENT` env var — if not set, does nothing
-2. Fetches the named parameter via `ssm.get_parameter(Name=..., WithDecryption=True)`
-3. Validates the parameter value is a flat JSON object (all values must be strings, no empty keys)
-4. Sets each key-value pair in `os.environ` — existing env vars are overridden
-5. Caches the result via a module-level sentinel — subsequent calls are free no-ops
+1. Checks for the `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` env var — if not set, does nothing
+2. Parses and validates the reference format (9 segments, non-empty version-stage and version-id)
+3. Fetches the secret via `secretsmanager.get_secret_value(SecretId=..., VersionStage=..., VersionId=...)`
+4. Validates the secret value is a flat JSON object (all values must be strings, no empty keys)
+5. Sets each key-value pair in `os.environ` — existing env vars are overridden
+6. Caches the result via a module-level sentinel — subsequent calls are free no-ops
 
-Because SSM loading runs first, the parameter can provide `DJANGO_SETTINGS_MODULE` itself, and secrets loaded by `resolve_secrets_into_env()` can reference SSM-loaded values.
+Because environment loading runs first, the secret can provide `DJANGO_SETTINGS_MODULE` itself, and individual secrets loaded by `resolve_secrets_into_env()` can reference environment-loaded values.
 
 #### Validation errors
 
 The following raise `ValueError` at cold start, preventing the Lambda container from starting:
 
-- Parameter value is not valid JSON
+- Reference format is invalid (wrong segment count, empty version-stage or version-id)
+- Secret value is not valid JSON
 - JSON is not a flat object (contains non-string values) — error message lists the offending keys
 - JSON contains an empty string key
 
-AWS errors (parameter not found, permission denied) propagate as boto3 exceptions and crash the container at cold start.
+AWS errors (secret not found, permission denied) propagate as boto3 exceptions and crash the container at cold start.
 
 ---
 
