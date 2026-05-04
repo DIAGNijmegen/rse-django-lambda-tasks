@@ -32,43 +32,34 @@ def _perform_cold_start() -> None:
     Both loaders are idempotent and run unconditionally — the environment
     secret may provide DJANGO_SETTINGS_MODULE, and individual secrets may
     depend on environment-loaded vars.
+
+    A temporary StreamHandler is attached to the ``lambda_tasks`` logger for
+    the duration of the loaders so their log output is visible before Django's
+    LOGGING dictConfig has run. It is removed immediately after so that
+    Django's configuration is the sole authority on logging from that point on.
     """
     global _cold_start_done
 
     if _cold_start_done:
         return
 
-    resolve_environment()
-    resolve_secrets_into_env()
+    lambda_tasks_logger = logging.getLogger(__package__)
+    boot_handler = logging.StreamHandler()
+    boot_handler.setLevel(logging.DEBUG)
+    lambda_tasks_logger.addHandler(boot_handler)
+    lambda_tasks_logger.setLevel(logging.DEBUG)
+
+    try:
+        resolve_environment()
+        resolve_secrets_into_env()
+    finally:
+        lambda_tasks_logger.removeHandler(boot_handler)
+        lambda_tasks_logger.setLevel(logging.NOTSET)
 
     if os.environ.get("DJANGO_SETTINGS_MODULE") and not apps.ready:
         django.setup()
 
-    _configure_logging()
-
     _cold_start_done = True
-
-
-def _configure_logging() -> None:
-    """Ensure the lambda_tasks logger hierarchy emits at INFO so task log lines
-    appear in CloudWatch.
-
-    The AWS Lambda runtime pre-configures the root logger, but child loggers
-    default to WARNING unless explicitly configured. If Django's LOGGING
-    dictConfig has already set a level on the ``lambda_tasks`` logger (i.e. the
-    user explicitly configured it), we leave it alone. Otherwise we default to
-    INFO (or the value of the LAMBDA_TASKS_LOG_LEVEL env var).
-    """
-    lambda_tasks_logger = logging.getLogger("lambda_tasks")
-
-    # level == NOTSET means nobody (neither dictConfig nor user code) has
-    # explicitly configured this logger — safe to apply our default.
-    if lambda_tasks_logger.level != logging.NOTSET:
-        return
-
-    log_level_name = os.environ.get("LAMBDA_TASKS_LOG_LEVEL", "INFO").upper()
-    log_level = getattr(logging, log_level_name, logging.INFO)
-    lambda_tasks_logger.setLevel(log_level)
 
 
 def handler(event: dict, context: object) -> dict:

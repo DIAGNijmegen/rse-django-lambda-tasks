@@ -24,7 +24,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from lambda_tasks.handler import _configure_logging, handler
+from lambda_tasks.handler import handler
 
 # ---------------------------------------------------------------------------
 # Signature test
@@ -371,45 +371,89 @@ def test_property_4_cold_start_runs_only_once(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _configure_logging tests
+# Cold-start logging tests
 # ---------------------------------------------------------------------------
 
 
-class TestConfigureLogging:
-    def test_sets_lambda_tasks_logger_to_info_by_default(self, monkeypatch):
-        """Without LAMBDA_TASKS_LOG_LEVEL env var, the lambda_tasks logger is set to INFO."""
-        monkeypatch.delenv("LAMBDA_TASKS_LOG_LEVEL", raising=False)
-        logging.getLogger("lambda_tasks").setLevel(logging.NOTSET)
-        _configure_logging()
-        assert logging.getLogger("lambda_tasks").level == logging.INFO
+class TestColdStartLogging:
+    def test_loader_logs_are_emitted_during_cold_start(self, monkeypatch, capfd):
+        """Loader log output is visible during cold start before Django setup."""
+        import lambda_tasks.handler as handler_module
 
-    def test_task_logger_effective_level_is_info(self, monkeypatch):
-        """task_logger (lambda_tasks.task) inherits INFO from the parent."""
-        monkeypatch.delenv("LAMBDA_TASKS_LOG_LEVEL", raising=False)
-        logging.getLogger("lambda_tasks").setLevel(logging.NOTSET)
-        _configure_logging()
-        assert (
-            logging.getLogger("lambda_tasks.task").getEffectiveLevel() == logging.INFO
+        monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
+
+        logged_messages: list[str] = []
+
+        def spy_resolve_environment():
+            logging.getLogger("lambda_tasks.environment_loader").info(
+                "env loader message"
+            )
+
+        def spy_resolve_secrets():
+            logging.getLogger("lambda_tasks.secret_loader").info(
+                "secret loader message"
+            )
+
+        monkeypatch.setattr(
+            "lambda_tasks.handler.resolve_environment", spy_resolve_environment
+        )
+        monkeypatch.setattr(
+            "lambda_tasks.handler.resolve_secrets_into_env", spy_resolve_secrets
         )
 
-    def test_respects_lambda_tasks_log_level_env_var(self, monkeypatch):
-        """LAMBDA_TASKS_LOG_LEVEL env var controls the logger level."""
-        monkeypatch.setenv("LAMBDA_TASKS_LOG_LEVEL", "DEBUG")
-        logging.getLogger("lambda_tasks").setLevel(logging.NOTSET)
-        _configure_logging()
-        assert logging.getLogger("lambda_tasks").level == logging.DEBUG
+        lambda_tasks_logger = logging.getLogger("lambda_tasks")
+        lambda_tasks_logger.handlers.clear()
+        lambda_tasks_logger.setLevel(logging.NOTSET)
 
-    def test_invalid_log_level_falls_back_to_info(self, monkeypatch):
-        """An invalid LAMBDA_TASKS_LOG_LEVEL value falls back to INFO."""
-        monkeypatch.setenv("LAMBDA_TASKS_LOG_LEVEL", "NONSENSE")
-        logging.getLogger("lambda_tasks").setLevel(logging.NOTSET)
-        _configure_logging()
-        assert logging.getLogger("lambda_tasks").level == logging.INFO
+        handler_module._cold_start_done = False
+        handler_module.handler(event={"Records": []}, context=None)
 
-    def test_does_not_override_explicit_django_logging_config(self, monkeypatch):
-        """If Django's LOGGING dictConfig already set a level, _configure_logging leaves it alone."""
-        monkeypatch.delenv("LAMBDA_TASKS_LOG_LEVEL", raising=False)
-        # Simulate Django dictConfig having set the logger to WARNING
-        logging.getLogger("lambda_tasks").setLevel(logging.WARNING)
-        _configure_logging()
-        assert logging.getLogger("lambda_tasks").level == logging.WARNING
+        captured = capfd.readouterr()
+        assert "env loader message" in captured.err
+        assert "secret loader message" in captured.err
+
+    def test_boot_handler_removed_after_loaders(self, monkeypatch):
+        """The temporary handler is removed after the loaders run, leaving
+        the logger clean for Django's LOGGING dictConfig."""
+        import lambda_tasks.handler as handler_module
+
+        monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
+        monkeypatch.setattr("lambda_tasks.handler.resolve_environment", lambda: None)
+        monkeypatch.setattr(
+            "lambda_tasks.handler.resolve_secrets_into_env", lambda: None
+        )
+
+        lambda_tasks_logger = logging.getLogger("lambda_tasks")
+        lambda_tasks_logger.handlers.clear()
+        lambda_tasks_logger.setLevel(logging.NOTSET)
+
+        handler_module._cold_start_done = False
+        handler_module.handler(event={"Records": []}, context=None)
+
+        assert lambda_tasks_logger.handlers == []
+        assert lambda_tasks_logger.level == logging.NOTSET
+
+    def test_boot_handler_removed_even_on_loader_error(self, monkeypatch):
+        """The temporary handler is cleaned up even if a loader raises."""
+        import lambda_tasks.handler as handler_module
+
+        monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
+        monkeypatch.setattr(
+            "lambda_tasks.handler.resolve_environment",
+            lambda: (_ for _ in ()).throw(ValueError("bad ref")),
+        )
+        monkeypatch.setattr(
+            "lambda_tasks.handler.resolve_secrets_into_env", lambda: None
+        )
+
+        lambda_tasks_logger = logging.getLogger("lambda_tasks")
+        lambda_tasks_logger.handlers.clear()
+        lambda_tasks_logger.setLevel(logging.NOTSET)
+
+        handler_module._cold_start_done = False
+
+        with pytest.raises(ValueError, match="bad ref"):
+            handler_module.handler(event={"Records": []}, context=None)
+
+        assert lambda_tasks_logger.handlers == []
+        assert lambda_tasks_logger.level == logging.NOTSET

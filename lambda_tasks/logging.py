@@ -21,7 +21,7 @@ class _TaskLogger(logging.LoggerAdapter):
     """LoggerAdapter that prepends [message_id] to every message."""
 
     def __init__(self) -> None:
-        super().__init__(logging.getLogger("lambda_tasks.task"), extra={})
+        super().__init__(logging.getLogger(f"{__package__}.task"), extra={})
         self.message_id: str | None = None
 
     def process(

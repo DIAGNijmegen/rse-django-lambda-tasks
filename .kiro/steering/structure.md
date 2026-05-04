@@ -40,7 +40,7 @@ django-lambda-tasks/
 
 - `decorators.py` — defines `@lambda_task`; enforces kwargs-only at decoration time
 - `models.py` — `TaskRecord` (Django ORM), `SQSLambdaTaskMessage` (Pydantic, SQS schema + execution logic), `SQSLambdaTask` (Pydantic, holds message + routing; `_execute()` publishes to SQS or executes eagerly; `execute_on_commit()` registers `_execute` with `transaction.on_commit`)
-- `handler.py` — Lambda entry point; cold-start init (`resolve_environment()` → `resolve_secrets_into_env()` → conditional `django.setup()`) runs inside the handler on first invocation, guarded by `_cold_start_done` sentinel; processes SQS records independently; returns `batchItemFailures`
+- `handler.py` — Lambda entry point; cold-start init (temporary log handler → `resolve_environment()` → `resolve_secrets_into_env()` → handler removed → conditional `django.setup()`) runs inside the handler on first invocation, guarded by `_cold_start_done` sentinel; processes SQS records independently; returns `batchItemFailures`
 - `environment_loader.py` — loads env vars from a Secrets Manager secret at cold start; validates flat JSON format; idempotent via `_loaded` sentinel
 - `secret_loader.py` — resolves `LAMBDA_TASKS_SECRET_*` env vars from Secrets Manager before Django starts; validates format, detects conflicts, batches API calls; idempotent via `_loaded` sentinel
 - `logging.py` — `task_logger` singleton; `message_id` set/cleared around each task execution

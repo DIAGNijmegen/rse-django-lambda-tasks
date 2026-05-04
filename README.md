@@ -308,7 +308,7 @@ def send_welcome_email(*, user_id: int, template: str) -> str:
 
 `task_logger` is a `LoggerAdapter` wrapping the `lambda_tasks.task` logger. `SQSLambdaTaskMessage.execute_immediately()` sets the `message_id` before each task runs and clears it afterwards — you don't need to manage it yourself.
 
-The Lambda handler configures the `lambda_tasks` logger hierarchy to `INFO` at cold start so that `task_logger` lines appear in CloudWatch. You can override the level by setting the `LAMBDA_TASKS_LOG_LEVEL` environment variable on your Lambda function (e.g. `DEBUG`, `WARNING`).
+The Lambda handler configures the `lambda_tasks` logger hierarchy to `INFO` at cold start so that `task_logger` lines appear in CloudWatch. You can control the level by configuring the `lambda_tasks` logger in your Django `LOGGING` setting (e.g. set it to `DEBUG` or `WARNING`). If your `LOGGING` dictConfig sets a root logger with a handler (as most Django projects do), `lambda_tasks` will inherit from it via propagation.
 
 Using your own `logging.getLogger(__name__)` is fine too; those records just won't carry the `message_id` prefix.
 
@@ -448,14 +448,13 @@ Point your Lambda function's handler at:
 lambda_tasks.handler.handler
 ```
 
-The handler performs cold-start initialisation on the first invocation (not at module import time) to avoid Lambda init-duration timeouts. The sequence is: `resolve_environment()` → `resolve_secrets_into_env()` → conditional `django.setup()`. A module-level sentinel ensures this runs only once; subsequent warm invocations skip it entirely.
+The handler performs cold-start initialisation on the first invocation (not at module import time) to avoid Lambda init-duration timeouts. The sequence is: temporary log handler attached → `resolve_environment()` → `resolve_secrets_into_env()` → log handler removed → conditional `django.setup()`. A module-level sentinel ensures this runs only once; subsequent warm invocations skip it entirely.
 
 Ensure the Lambda execution environment has `DJANGO_SETTINGS_MODULE` set and that all task modules are importable (i.e. your application code is on the Python path).
 
 | Environment Variable | Required | Description |
 |---|---|---|
 | `DJANGO_SETTINGS_MODULE` | Yes | Django settings module path (e.g. `myapp.settings.production`). |
-| `LAMBDA_TASKS_LOG_LEVEL` | No | Log level for the `lambda_tasks` logger hierarchy (default `INFO`). Set to `DEBUG`, `WARNING`, etc. as needed. |
 | `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` | No | Secrets Manager reference (`<arn>:<version-stage>:<version-id>`) to load as environment variables at cold start (runs first). |
 | `LAMBDA_TASKS_SECRET_*` | No | Secrets Manager references resolved into individual env vars at cold start (runs second, after environment loading). |
 
