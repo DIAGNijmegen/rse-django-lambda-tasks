@@ -62,7 +62,7 @@ def sync_user(*, user_id: int) -> None:
 
 ## retry_on
 
-Pass a tuple of exception types to `retry_on` on `@lambda_task`. If the task raises an instance of any of those types (or a subclass), the executor automatically re-enqueues the task via `execute_on_commit` with the same kwargs, and an incremented `_n_retries` counter.
+Pass a tuple of exception types to `retry_on` on `@lambda_task`. If the task raises an instance of any of those types (or a subclass), the executor automatically re-enqueues the task with the same kwargs and an incremented `n_retries` counter on the `SQSLambdaTaskMessage`.
 
 - `TaskRecord.status` is set to `RETRYING` and the traceback is recorded
 - The retry is a new invocation — the current record is terminal at `RETRYING`
@@ -125,7 +125,7 @@ class SQSLambdaTaskMessage(BaseModel):
 7. On ignored exception (type matches `ignore_errors`): rolls back task-side writes, commits record as `SUCCESS` with traceback and `end_time`
 8. On retryable exception (type matches `retry_on` or `LockError` for singleton tasks, `n_retries < MAX_RETRIES`): rolls back task-side writes, enqueues retry via `execute_on_commit` with `n_retries + 1`, commits record as `RETRYING` with traceback and `end_time`
 9. On retryable exception with `n_retries >= MAX_RETRIES`: commits record as `FAILED` with traceback, raises `MaxRetriesExceededError`
-10. On any other exception: rolls back atomic block, updates record to `FAILED` with traceback
+10. On any other exception: rolls back atomic block, updates record to `FAILED` with traceback and `end_time`
 
 ## Lambda Handler
 
@@ -205,7 +205,7 @@ Set `LAMBDA_TASKS_EAGER = True` to run tasks synchronously in-process (no SQS). 
 
 In eager mode a random UUID4 is generated as the `message_id` passed to `execute_immediately()`.
 
-**Timeouts are not enforced in eager mode.** `TimeoutContext` is skipped entirely — `SIGALRM`-based timeouts require a Lambda worker process, not a Django dev server thread. Timeout values are still validated at decoration time.
+**Timeouts are not enforced in eager mode.** `TimeoutContext` is still entered but becomes a no-op — it checks `LAMBDA_TASKS_EAGER` internally and skips `SIGALRM` setup. `SIGALRM`-based timeouts require a Lambda worker process, not a Django dev server thread. Timeout values are still validated at decoration time.
 
 ## Logging
 

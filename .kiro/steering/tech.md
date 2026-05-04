@@ -42,7 +42,7 @@ uv run pytest tests/test_foo.py  # single file
 uv run pytest -x                 # stop on first failure
 ```
 
-- Tests live in `tests/` — one file per source module (`executor.py` → `test_executor.py`)
+- Tests live in `tests/` — one file per source module (`models.py` → `test_models.py`)
 - Django settings for tests are in `tests/settings.py`
 - Use `hypothesis` for property-based tests where correctness properties can be expressed
 

@@ -115,13 +115,32 @@ LAMBDA_TASKS_DEFAULT_SOFT_TIMEOUT = 240
 LAMBDA_TASKS_DEFAULT_HARD_TIMEOUT = 270
 ```
 
+### Retry settings
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `LAMBDA_TASKS_MAX_RETRIES` | `int` | `2880` | Maximum retry attempts before `MaxRetriesExceededError` is raised (default is 60 × 24 × 2). |
+
+### Singleton settings
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `LAMBDA_TASKS_SINGLETON_CACHE` | `str` | `"default"` | Django cache backend used for singleton task locks. |
+
+### Environment and secrets
+
+| Setting | Type | Description |
+|---|---|---|
+| `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` | env var | Secrets Manager reference (`<arn>:<version-stage>:<version-id>`) to load as environment variables at Lambda cold start. |
+| `LAMBDA_TASKS_SECRET_*` | env var(s) | Secrets Manager references resolved into env vars at Lambda cold start. The unprefixed name becomes the target env var. |
+
+These are environment variables set on the Lambda function, not Django settings. See [Loading environment variables from Secrets Manager](#loading-environment-variables-from-secrets-manager) and [Resolving individual secrets from AWS Secrets Manager](#resolving-individual-secrets-from-aws-secrets-manager) for full details.
+
 ### Eager execution (development / testing)
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `LAMBDA_TASKS_EAGER` | `bool` | `False` | When `True`, tasks run synchronously in-process instead of being sent to SQS. |
-| `LAMBDA_TASKS_MAX_RETRIES` | `int` | `2880` | Maximum retry attempts before `MaxRetriesExceededError` is raised. |
-| `LAMBDA_TASKS_SINGLETON_CACHE` | `str` | `"default"` | Django cache backend used for singleton task locks. |
 
 ```python
 # settings/local.py
@@ -130,7 +149,7 @@ LAMBDA_TASKS_EAGER = True
 
 With eager mode enabled, `.execute_on_commit()` executes the task immediately without touching SQS. Useful for local development and test suites where you don't want to mock AWS infrastructure.
 
-> **Note:** Timeouts are not enforced in eager mode. `soft_timeout` and `hard_timeout` values are accepted and stored but `TimeoutContext` is never entered — the task runs without any time limit. This is intentional: `SIGALRM`-based timeouts require a Lambda/Unix worker process, not a Django dev server thread.
+> **Note:** Timeouts are not enforced in eager mode. `soft_timeout` and `hard_timeout` values are accepted and stored but `TimeoutContext` becomes a no-op — it checks `LAMBDA_TASKS_EAGER` internally and skips `SIGALRM` setup. This is intentional: `SIGALRM`-based timeouts require a Lambda/Unix worker process, not a Django dev server thread.
 
 ---
 
@@ -138,6 +157,7 @@ With eager mode enabled, `.execute_on_commit()` executes the task immediately wi
 
 ```python
 @lambda_task(
+    delay=0,               # seconds — SQS DelaySeconds before message becomes visible
     soft_timeout=60,       # seconds — overrides global default for this task
     hard_timeout=90,       # seconds — overrides global default for this task
     queue="default",       # named queue from LAMBDA_TASKS_QUEUES
@@ -152,6 +172,7 @@ def my_task(*, arg: str) -> None:
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `delay` | `int` | `0` | Seconds to delay the SQS message before it becomes visible to consumers (max 900). |
 | `soft_timeout` | `int \| None` | `None` (uses global default) | Per-task soft timeout in seconds (max 900). |
 | `hard_timeout` | `int \| None` | `None` (uses global default) | Per-task hard timeout in seconds (max 900). |
 | `queue` | `str` | `"default"` | Named queue to route this task to. |
@@ -178,7 +199,7 @@ payload = send_welcome_email.serialize(user_id=42, template="welcome")
 # }
 ```
 
-The returned dict matches the `SQSLambdaTask` schema. To reconstruct and enqueue it later:
+The returned dict matches the `SQSLambdaTask` schema (`message`, `delay`, `queue`). The `delay` value comes from the decorator's `delay` parameter. To reconstruct and enqueue it later:
 
 ```python
 from lambda_tasks.models import SQSLambdaTask
@@ -258,8 +279,10 @@ TaskRecord.objects.get(pk="<uuid>")
 
 | Field | Type | Description |
 |---|---|---|
+| `id` | `UUID` | Primary key — set to the SQS `messageId` for deduplication. |
 | `task_name` | `str` | Fully-qualified function name (e.g. `myapp.tasks.send_welcome_email`). |
 | `kwargs` | `dict` | Serialized task arguments. |
+| `n_retries` | `int` | Number of retries attempted so far (starts at 0). |
 | `status` | `str` | One of `RUNNING`, `SUCCESS`, `FAILED`, `RETRYING`. |
 | `start_time` | `datetime \| None` | When the worker began executing the task. |
 | `end_time` | `datetime \| None` | When the task completed or failed. |
@@ -430,58 +453,8 @@ Ensure the Lambda execution environment has `DJANGO_SETTINGS_MODULE` set and tha
 | Environment Variable | Required | Description |
 |---|---|---|
 | `DJANGO_SETTINGS_MODULE` | Yes | Django settings module path (e.g. `myapp.settings.production`). |
-| `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` | No | Secrets Manager reference (`<arn>:<version-stage>:<version-id>`) to load as environment variables at cold start. |
-| `LAMBDA_TASKS_SECRET_*` | No | Secrets Manager references resolved into env vars at cold start (see below). |
-
-### Resolving Django settings from AWS Secrets Manager
-
-The Lambda handler supports loading secret values from AWS Secrets Manager into the environment before Django starts. This lets your Django settings file read from `os.environ` as normal while keeping secrets out of plaintext environment variables.
-
-Set any env var with the prefix `LAMBDA_TASKS_SECRET_` to a full Secrets Manager dynamic reference. The unprefixed name becomes the target env var:
-
-```
-LAMBDA_TASKS_SECRET_DATABASE_URL=arn:aws:secretsmanager:eu-west-1:123456789012:secret:myapp/prod:DATABASE_URL:AWSCURRENT:v1
-```
-
-At cold start (on the first handler invocation), before `django.setup()` is called, the handler calls `resolve_secrets_into_env()` which:
-
-1. Scans all env vars for the `LAMBDA_TASKS_SECRET_` prefix
-2. Validates every reference — malformed references raise immediately so the container fails to start rather than misconfiguring Django silently
-3. Groups references by `(ARN, version-stage, version-id)` and makes one `GetSecretValue` call per unique combination
-4. Extracts the named JSON key from the secret and writes it into `os.environ`
-5. Caches fetched secrets in-process — warm invocations pay no extra cost
-
-#### Reference format
-
-Every value must follow the full dynamic reference syntax:
-
-```
-<arn>:<json-key>:<version-stage>:<version-id>
-```
-
-All four fields are required and must be non-empty. The secret value must be a JSON object; `json-key` names the field to extract.
-
-```
-# arn (7 segments) : json-key : version-stage : version-id
-arn:aws:secretsmanager:eu-west-1:123456789012:secret:myapp/prod:DATABASE_URL:AWSCURRENT:v1
-```
-
-Multiple env vars can reference different keys from the same secret — only one `GetSecretValue` call is made for that `(ARN, version-stage, version-id)` combination:
-
-```
-LAMBDA_TASKS_SECRET_DATABASE_URL=arn:...:myapp/prod:DATABASE_URL:AWSCURRENT:v1
-LAMBDA_TASKS_SECRET_SECRET_KEY=arn:...:myapp/prod:SECRET_KEY:AWSCURRENT:v1
-```
-
-#### Validation errors
-
-The following all raise `ValueError` at cold start, preventing the Lambda container from starting with a misconfigured environment:
-
-- Wrong number of colon-separated segments (must be exactly 10)
-- Empty `json-key`, `version-stage`, or `version-id`
-- Both `LAMBDA_TASKS_SECRET_FOO` and `FOO` are set — use one or the other
-- The named JSON key does not exist in the fetched secret
-- The secret value is not valid JSON
+| `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` | No | Secrets Manager reference (`<arn>:<version-stage>:<version-id>`) to load as environment variables at cold start (runs first). |
+| `LAMBDA_TASKS_SECRET_*` | No | Secrets Manager references resolved into individual env vars at cold start (runs second, after environment loading). |
 
 ### Loading environment variables from Secrets Manager
 
@@ -527,6 +500,56 @@ The following raise `ValueError` at cold start, preventing the Lambda container 
 
 AWS errors (secret not found, permission denied) propagate as boto3 exceptions and crash the container at cold start.
 
+### Resolving individual secrets from AWS Secrets Manager
+
+The Lambda handler supports loading individual secret values from AWS Secrets Manager into the environment before Django starts. This lets your Django settings file read from `os.environ` as normal while keeping secrets out of plaintext environment variables.
+
+Set any env var with the prefix `LAMBDA_TASKS_SECRET_` to a full Secrets Manager dynamic reference. The unprefixed name becomes the target env var:
+
+```
+LAMBDA_TASKS_SECRET_DATABASE_URL=arn:aws:secretsmanager:eu-west-1:123456789012:secret:myapp/prod:DATABASE_URL:AWSCURRENT:v1
+```
+
+At cold start (on the first handler invocation), after `resolve_environment()` and before `django.setup()`, the handler calls `resolve_secrets_into_env()` which:
+
+1. Scans all env vars for the `LAMBDA_TASKS_SECRET_` prefix
+2. Validates every reference — malformed references raise immediately so the container fails to start rather than misconfiguring Django silently
+3. Groups references by `(ARN, version-stage, version-id)` and makes one `GetSecretValue` call per unique combination
+4. Extracts the named JSON key from the secret and writes it into `os.environ`
+5. Caches fetched secrets in-process — warm invocations pay no extra cost
+
+#### Reference format
+
+Every value must follow the full dynamic reference syntax:
+
+```
+<arn>:<json-key>:<version-stage>:<version-id>
+```
+
+All four fields are required and must be non-empty. The secret value must be a JSON object; `json-key` names the field to extract.
+
+```
+# arn (7 segments) : json-key : version-stage : version-id
+arn:aws:secretsmanager:eu-west-1:123456789012:secret:myapp/prod:DATABASE_URL:AWSCURRENT:v1
+```
+
+Multiple env vars can reference different keys from the same secret — only one `GetSecretValue` call is made for that `(ARN, version-stage, version-id)` combination:
+
+```
+LAMBDA_TASKS_SECRET_DATABASE_URL=arn:...:myapp/prod:DATABASE_URL:AWSCURRENT:v1
+LAMBDA_TASKS_SECRET_SECRET_KEY=arn:...:myapp/prod:SECRET_KEY:AWSCURRENT:v1
+```
+
+#### Validation errors
+
+The following all raise `ValueError` at cold start, preventing the Lambda container from starting with a misconfigured environment:
+
+- Wrong number of colon-separated segments (must be exactly 10)
+- Empty `json-key`, `version-stage`, or `version-id`
+- Both `LAMBDA_TASKS_SECRET_FOO` and `FOO` are set — use one or the other
+- The named JSON key does not exist in the fetched secret
+- The secret value is not valid JSON
+
 ---
 
 ## Built-in tasks
@@ -559,4 +582,4 @@ You can call a decorated task directly like a normal function — useful in test
 result = send_welcome_email(user_id=1, template="welcome")
 ```
 
-This bypasses the queue entirely and runs the function in the current process and transaction.
+This bypasses the queue entirely and runs the function in the current process. No `TaskRecord` is created, no `transaction.atomic()` block is used, and no timeout enforcement applies — it behaves exactly like calling the underlying function directly. Kwargs are still validated against the task's type annotations via Pydantic.
