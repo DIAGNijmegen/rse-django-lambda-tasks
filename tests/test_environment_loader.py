@@ -551,34 +551,42 @@ class TestPropertyIdempotentExecution:
 
 
 class TestHandlerColdStartOrdering:
-    """Verify handler.py cold-start calls environment loader, then secrets, then conditionally Django."""
+    """Verify handler cold-start runs environment loader, then secrets, then conditionally Django."""
+
+    def _invoke_handler(self) -> None:
+        """Invoke the handler with a minimal valid event to trigger cold-start."""
+        import json
+
+        from lambda_tasks.handler import handler
+
+        body = json.dumps({"task_name": "some.task", "kwargs": {}})
+        event = {"Records": [{"messageId": "msg-1", "body": body}]}
+        handler(event=event, context=None)
 
     def test_resolve_environment_called_before_resolve_secrets_into_env(
         self,
         monkeypatch,
     ) -> None:
         """resolve_environment() runs before resolve_secrets_into_env()."""
-        import sys
+        import lambda_tasks.handler as handler_module
 
         call_order: list[str] = []
 
         monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
 
-        with (
-            patch(
-                "lambda_tasks.environment_loader.resolve_environment",
-                side_effect=lambda: call_order.append("resolve_environment"),
-            ),
-            patch(
-                "lambda_tasks.secret_loader.resolve_secrets_into_env",
-                side_effect=lambda: call_order.append("resolve_secrets_into_env"),
-            ),
-            patch("django.setup"),
-            patch("django.apps.apps.ready", new=False),
-        ):
-            # Remove cached handler module so reload triggers cold-start code
-            sys.modules.pop("lambda_tasks.handler", None)
-            import lambda_tasks.handler  # noqa: F401
+        monkeypatch.setattr(
+            handler_module,
+            "resolve_environment",
+            lambda: call_order.append("resolve_environment"),
+        )
+        monkeypatch.setattr(
+            handler_module,
+            "resolve_secrets_into_env",
+            lambda: call_order.append("resolve_secrets_into_env"),
+        )
+
+        handler_module._cold_start_done = False
+        self._invoke_handler()
 
         assert call_order.index("resolve_environment") < call_order.index(
             "resolve_secrets_into_env"
@@ -592,27 +600,27 @@ class TestHandlerColdStartOrdering:
         monkeypatch,
     ) -> None:
         """Both loaders run even when DJANGO_SETTINGS_MODULE is unset."""
-        import sys
+        import lambda_tasks.handler as handler_module
 
         call_order: list[str] = []
 
-        # Ensure DJANGO_SETTINGS_MODULE is NOT set — loaders must still run
         monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
 
-        with (
-            patch(
-                "lambda_tasks.environment_loader.resolve_environment",
-                side_effect=lambda: call_order.append("resolve_environment"),
-            ),
-            patch(
-                "lambda_tasks.secret_loader.resolve_secrets_into_env",
-                side_effect=lambda: call_order.append("resolve_secrets_into_env"),
-            ),
-            patch("django.setup") as mock_django_setup,
-            patch("django.apps.apps.ready", new=False),
-        ):
-            sys.modules.pop("lambda_tasks.handler", None)
-            import lambda_tasks.handler  # noqa: F401
+        monkeypatch.setattr(
+            handler_module,
+            "resolve_environment",
+            lambda: call_order.append("resolve_environment"),
+        )
+        monkeypatch.setattr(
+            handler_module,
+            "resolve_secrets_into_env",
+            lambda: call_order.append("resolve_secrets_into_env"),
+        )
+
+        handler_module._cold_start_done = False
+
+        with patch("django.setup") as mock_django_setup:
+            self._invoke_handler()
 
         assert (
             "resolve_environment" in call_order
@@ -620,7 +628,6 @@ class TestHandlerColdStartOrdering:
         assert (
             "resolve_secrets_into_env" in call_order
         ), "resolve_secrets_into_env was not called when DJANGO_SETTINGS_MODULE is unset"
-        # django.setup() should NOT have been called since DJANGO_SETTINGS_MODULE is unset
         mock_django_setup.assert_not_called()
 
     def test_django_setup_called_when_settings_module_set_and_apps_not_ready(
@@ -628,22 +635,19 @@ class TestHandlerColdStartOrdering:
         monkeypatch,
     ) -> None:
         """django.setup() called when DJANGO_SETTINGS_MODULE is set and apps.ready is False."""
-        import sys
+        import lambda_tasks.handler as handler_module
 
         monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "tests.settings")
+        monkeypatch.setattr(handler_module, "resolve_environment", lambda: None)
+        monkeypatch.setattr(handler_module, "resolve_secrets_into_env", lambda: None)
+
+        handler_module._cold_start_done = False
 
         with (
-            patch(
-                "lambda_tasks.environment_loader.resolve_environment",
-            ),
-            patch(
-                "lambda_tasks.secret_loader.resolve_secrets_into_env",
-            ),
             patch("django.setup") as mock_django_setup,
             patch("django.apps.apps.ready", new=False),
         ):
-            sys.modules.pop("lambda_tasks.handler", None)
-            import lambda_tasks.handler  # noqa: F401
+            self._invoke_handler()
 
         mock_django_setup.assert_called_once()
 
@@ -652,22 +656,19 @@ class TestHandlerColdStartOrdering:
         monkeypatch,
     ) -> None:
         """django.setup() is NOT called when apps.ready is True."""
-        import sys
+        import lambda_tasks.handler as handler_module
 
         monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "tests.settings")
+        monkeypatch.setattr(handler_module, "resolve_environment", lambda: None)
+        monkeypatch.setattr(handler_module, "resolve_secrets_into_env", lambda: None)
+
+        handler_module._cold_start_done = False
 
         with (
-            patch(
-                "lambda_tasks.environment_loader.resolve_environment",
-            ),
-            patch(
-                "lambda_tasks.secret_loader.resolve_secrets_into_env",
-            ),
             patch("django.setup") as mock_django_setup,
             patch("django.apps.apps.ready", new=True),
         ):
-            sys.modules.pop("lambda_tasks.handler", None)
-            import lambda_tasks.handler  # noqa: F401
+            self._invoke_handler()
 
         mock_django_setup.assert_not_called()
 
@@ -676,21 +677,15 @@ class TestHandlerColdStartOrdering:
         monkeypatch,
     ) -> None:
         """django.setup() is NOT called when DJANGO_SETTINGS_MODULE is unset."""
-        import sys
+        import lambda_tasks.handler as handler_module
 
         monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
+        monkeypatch.setattr(handler_module, "resolve_environment", lambda: None)
+        monkeypatch.setattr(handler_module, "resolve_secrets_into_env", lambda: None)
 
-        with (
-            patch(
-                "lambda_tasks.environment_loader.resolve_environment",
-            ),
-            patch(
-                "lambda_tasks.secret_loader.resolve_secrets_into_env",
-            ),
-            patch("django.setup") as mock_django_setup,
-            patch("django.apps.apps.ready", new=False),
-        ):
-            sys.modules.pop("lambda_tasks.handler", None)
-            import lambda_tasks.handler  # noqa: F401
+        handler_module._cold_start_done = False
+
+        with patch("django.setup") as mock_django_setup:
+            self._invoke_handler()
 
         mock_django_setup.assert_not_called()

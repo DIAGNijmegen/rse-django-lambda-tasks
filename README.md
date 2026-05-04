@@ -423,6 +423,8 @@ Point your Lambda function's handler at:
 lambda_tasks.handler.handler
 ```
 
+The handler performs cold-start initialisation on the first invocation (not at module import time) to avoid Lambda init-duration timeouts. The sequence is: `resolve_environment()` → `resolve_secrets_into_env()` → conditional `django.setup()`. A module-level sentinel ensures this runs only once; subsequent warm invocations skip it entirely.
+
 Ensure the Lambda execution environment has `DJANGO_SETTINGS_MODULE` set and that all task modules are importable (i.e. your application code is on the Python path).
 
 | Environment Variable | Required | Description |
@@ -441,7 +443,7 @@ Set any env var with the prefix `LAMBDA_TASKS_SECRET_` to a full Secrets Manager
 LAMBDA_TASKS_SECRET_DATABASE_URL=arn:aws:secretsmanager:eu-west-1:123456789012:secret:myapp/prod:DATABASE_URL:AWSCURRENT:v1
 ```
 
-At cold start, before `django.setup()` is called, the handler calls `resolve_secrets_into_env()` which:
+At cold start (on the first handler invocation), before `django.setup()` is called, the handler calls `resolve_secrets_into_env()` which:
 
 1. Scans all env vars for the `LAMBDA_TASKS_SECRET_` prefix
 2. Validates every reference — malformed references raise immediately so the container fails to start rather than misconfiguring Django silently
@@ -503,7 +505,7 @@ The secret value must be a flat JSON object where all keys and values are string
 }
 ```
 
-At cold start, before `resolve_secrets_into_env()` and `django.setup()`, the handler calls `resolve_environment()` which:
+At cold start (on the first handler invocation), before `resolve_secrets_into_env()` and `django.setup()`, the handler calls `resolve_environment()` which:
 
 1. Checks for the `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` env var — if not set, does nothing
 2. Parses and validates the reference format (9 segments, non-empty version-stage and version-id)

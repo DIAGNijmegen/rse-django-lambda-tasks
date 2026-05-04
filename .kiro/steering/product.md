@@ -15,7 +15,7 @@ View → @lambda_task.execute_on_commit() → SQS → Lambda handler → SQSLamb
 Key modules:
 - `decorators.py` — `@lambda_task` decorator and `LambdaTaskWrapper`
 - `models.py` — `TaskRecord` (Django ORM), `SQSLambdaTaskMessage` (SQS schema + execution), `SQSLambdaTask` (routing + SQS publish)
-- `handler.py` — AWS Lambda entry point with partial-batch failure reporting
+- `handler.py` — AWS Lambda entry point; cold-start init runs on first invocation (not at import time) with partial-batch failure reporting
 - `logging.py` — `task_logger` for invocation-scoped log output
 - `settings.py` — lazy `LambdaTasksSettings` reading from Django settings
 
@@ -135,7 +135,8 @@ class SQSLambdaTaskMessage(BaseModel):
 - Returns `{"batchItemFailures": [...]}` for partial-batch failure reporting
 - Only pre-execution failures (malformed message, import error, misconfiguration) are reported as `batchItemFailures` — task logic failures are caught and recorded as `FAILED` TaskRecords without raising
 - Recommended SQS queue settings: `maxReceiveCount=1` with a DLQ configured; automatic retries are not useful since task failures are not re-driven by design
-- Cold-start sequence: `resolve_environment()` → `resolve_secrets_into_env()` → conditional `django.setup()`
+- Cold-start sequence runs inside the handler on the first invocation (not at module import time) to avoid Lambda init-duration timeouts: `resolve_environment()` → `resolve_secrets_into_env()` → conditional `django.setup()`
+- A module-level `_cold_start_done` sentinel ensures the sequence runs only once; subsequent warm invocations skip it
 - Both loaders run unconditionally (outside the `DJANGO_SETTINGS_MODULE` check) — the environment secret may provide that var, and individual secrets may depend on environment-loaded vars
 
 ## Environment Loader

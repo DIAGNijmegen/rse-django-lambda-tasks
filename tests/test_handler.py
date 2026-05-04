@@ -271,32 +271,43 @@ def test_property_11_batch_records_processed_independently(flags):
 
 
 def test_property_4_django_setup_before_execute_task(monkeypatch):
+    """Cold-start init (resolve_environment, resolve_secrets, django.setup) runs
+    inside the handler on first invocation, not at module import time."""
     import importlib
 
     import django.apps
 
     import lambda_tasks.handler as handler_module
 
-    call_order = []
+    call_order: list[str] = []
 
     monkeypatch.setattr(django.apps.apps, "ready", False)
     monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "tests.settings")
 
+    def spy_resolve_environment():
+        call_order.append("resolve_environment")
+
+    def spy_resolve_secrets():
+        call_order.append("resolve_secrets_into_env")
+
     def spy_setup(*args, **kwargs):
         call_order.append("django.setup")
-
-    monkeypatch.setattr(django, "setup", spy_setup)
 
     def spy_model_validate(body):
         call_order.append("execute_task")
         return MagicMock()
 
     monkeypatch.setattr(
+        "lambda_tasks.handler.resolve_environment", spy_resolve_environment
+    )
+    monkeypatch.setattr(
+        "lambda_tasks.handler.resolve_secrets_into_env", spy_resolve_secrets
+    )
+    monkeypatch.setattr(django, "setup", spy_setup)
+    monkeypatch.setattr(
         "lambda_tasks.models.SQSLambdaTaskMessage.model_validate_json",
         spy_model_validate,
     )
-
-    importlib.reload(handler_module)
 
     body = json.dumps(
         {
@@ -305,17 +316,54 @@ def test_property_4_django_setup_before_execute_task(monkeypatch):
         }
     )
     event = {"Records": [{"messageId": "msg-1", "body": body}]}
+
+    # Reset the handler's cold-start guard so it runs init again
+    handler_module._cold_start_done = False
     handler_module.handler(event=event, context=None)
 
-    assert (
-        "django.setup" in call_order
-    ), f"django.setup was never called; call_order={call_order}"
-    setup_idx = call_order.index("django.setup")
-    execute_idx = (
-        call_order.index("execute_task")
-        if "execute_task" in call_order
-        else len(call_order)
+    assert call_order == [
+        "resolve_environment",
+        "resolve_secrets_into_env",
+        "django.setup",
+        "execute_task",
+    ], f"Unexpected call order: {call_order}"
+
+
+def test_property_4_cold_start_runs_only_once(monkeypatch):
+    """The cold-start init sequence runs only on the first invocation."""
+    import django.apps
+
+    import lambda_tasks.handler as handler_module
+
+    call_count = {"setup": 0}
+
+    monkeypatch.setattr(django.apps.apps, "ready", False)
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "tests.settings")
+
+    def spy_resolve_environment():
+        pass
+
+    def spy_resolve_secrets():
+        pass
+
+    def spy_setup(*args, **kwargs):
+        call_count["setup"] += 1
+
+    monkeypatch.setattr(
+        "lambda_tasks.handler.resolve_environment", spy_resolve_environment
     )
-    assert (
-        setup_idx < execute_idx
-    ), f"Expected django.setup before execute_task, got order: {call_order}"
+    monkeypatch.setattr(
+        "lambda_tasks.handler.resolve_secrets_into_env", spy_resolve_secrets
+    )
+    monkeypatch.setattr(django, "setup", spy_setup)
+
+    with _patch_model_validate(side_effect=lambda body: MagicMock()):
+        handler_module._cold_start_done = False
+        handler_module.handler(
+            event={"Records": [_make_record("m1", _valid_body())]}, context=None
+        )
+        handler_module.handler(
+            event={"Records": [_make_record("m2", _valid_body())]}, context=None
+        )
+
+    assert call_count["setup"] == 1

@@ -13,9 +13,10 @@ Required value format::
 That is: ``<arn>:<version-stage>:<version-id>`` (9 colon-separated segments).
 The ARN is 7 segments, plus version-stage and version-id.
 
-This runs at Lambda cold start — before ``resolve_secrets_into_env()`` and
-before ``django.setup()`` — so that environment variables loaded from the
-secret are available to both the secret loader and Django configuration.
+This is called by the handler on the first invocation (cold start) — before
+``resolve_secrets_into_env()`` and before ``django.setup()`` — so that
+environment variables loaded from the secret are available to both the
+secret loader and Django configuration.
 
 The result is cached at module level via a ``_loaded`` sentinel so that
 subsequent calls (warm invocations) are free no-ops.
