@@ -16,6 +16,7 @@ Validates: Requirements 4.2, 4.3, 4.5
 
 import inspect
 import json
+import logging
 import uuid
 from unittest.mock import MagicMock, patch
 
@@ -23,7 +24,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from lambda_tasks.handler import handler
+from lambda_tasks.handler import _configure_logging, handler
 
 # ---------------------------------------------------------------------------
 # Signature test
@@ -367,3 +368,48 @@ def test_property_4_cold_start_runs_only_once(monkeypatch):
         )
 
     assert call_count["setup"] == 1
+
+
+# ---------------------------------------------------------------------------
+# _configure_logging tests
+# ---------------------------------------------------------------------------
+
+
+class TestConfigureLogging:
+    def test_sets_lambda_tasks_logger_to_info_by_default(self, monkeypatch):
+        """Without LAMBDA_TASKS_LOG_LEVEL env var, the lambda_tasks logger is set to INFO."""
+        monkeypatch.delenv("LAMBDA_TASKS_LOG_LEVEL", raising=False)
+        logging.getLogger("lambda_tasks").setLevel(logging.NOTSET)
+        _configure_logging()
+        assert logging.getLogger("lambda_tasks").level == logging.INFO
+
+    def test_task_logger_effective_level_is_info(self, monkeypatch):
+        """task_logger (lambda_tasks.task) inherits INFO from the parent."""
+        monkeypatch.delenv("LAMBDA_TASKS_LOG_LEVEL", raising=False)
+        logging.getLogger("lambda_tasks").setLevel(logging.NOTSET)
+        _configure_logging()
+        assert (
+            logging.getLogger("lambda_tasks.task").getEffectiveLevel() == logging.INFO
+        )
+
+    def test_respects_lambda_tasks_log_level_env_var(self, monkeypatch):
+        """LAMBDA_TASKS_LOG_LEVEL env var controls the logger level."""
+        monkeypatch.setenv("LAMBDA_TASKS_LOG_LEVEL", "DEBUG")
+        logging.getLogger("lambda_tasks").setLevel(logging.NOTSET)
+        _configure_logging()
+        assert logging.getLogger("lambda_tasks").level == logging.DEBUG
+
+    def test_invalid_log_level_falls_back_to_info(self, monkeypatch):
+        """An invalid LAMBDA_TASKS_LOG_LEVEL value falls back to INFO."""
+        monkeypatch.setenv("LAMBDA_TASKS_LOG_LEVEL", "NONSENSE")
+        logging.getLogger("lambda_tasks").setLevel(logging.NOTSET)
+        _configure_logging()
+        assert logging.getLogger("lambda_tasks").level == logging.INFO
+
+    def test_does_not_override_explicit_django_logging_config(self, monkeypatch):
+        """If Django's LOGGING dictConfig already set a level, _configure_logging leaves it alone."""
+        monkeypatch.delenv("LAMBDA_TASKS_LOG_LEVEL", raising=False)
+        # Simulate Django dictConfig having set the logger to WARNING
+        logging.getLogger("lambda_tasks").setLevel(logging.WARNING)
+        _configure_logging()
+        assert logging.getLogger("lambda_tasks").level == logging.WARNING

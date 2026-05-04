@@ -308,6 +308,8 @@ def send_welcome_email(*, user_id: int, template: str) -> str:
 
 `task_logger` is a `LoggerAdapter` wrapping the `lambda_tasks.task` logger. `SQSLambdaTaskMessage.execute_immediately()` sets the `message_id` before each task runs and clears it afterwards — you don't need to manage it yourself.
 
+The Lambda handler configures the `lambda_tasks` logger hierarchy to `INFO` at cold start so that `task_logger` lines appear in CloudWatch. You can override the level by setting the `LAMBDA_TASKS_LOG_LEVEL` environment variable on your Lambda function (e.g. `DEBUG`, `WARNING`).
+
 Using your own `logging.getLogger(__name__)` is fine too; those records just won't carry the `message_id` prefix.
 
 To filter by invocation in CloudWatch Logs Insights:
@@ -453,6 +455,7 @@ Ensure the Lambda execution environment has `DJANGO_SETTINGS_MODULE` set and tha
 | Environment Variable | Required | Description |
 |---|---|---|
 | `DJANGO_SETTINGS_MODULE` | Yes | Django settings module path (e.g. `myapp.settings.production`). |
+| `LAMBDA_TASKS_LOG_LEVEL` | No | Log level for the `lambda_tasks` logger hierarchy (default `INFO`). Set to `DEBUG`, `WARNING`, etc. as needed. |
 | `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` | No | Secrets Manager reference (`<arn>:<version-stage>:<version-id>`) to load as environment variables at cold start (runs first). |
 | `LAMBDA_TASKS_SECRET_*` | No | Secrets Manager references resolved into individual env vars at cold start (runs second, after environment loading). |
 

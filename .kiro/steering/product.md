@@ -135,9 +135,10 @@ class SQSLambdaTaskMessage(BaseModel):
 - Returns `{"batchItemFailures": [...]}` for partial-batch failure reporting
 - Only pre-execution failures (malformed message, import error, misconfiguration) are reported as `batchItemFailures` — task logic failures are caught and recorded as `FAILED` TaskRecords without raising
 - Recommended SQS queue settings: `maxReceiveCount=1` with a DLQ configured; automatic retries are not useful since task failures are not re-driven by design
-- Cold-start sequence runs inside the handler on the first invocation (not at module import time) to avoid Lambda init-duration timeouts: `resolve_environment()` → `resolve_secrets_into_env()` → conditional `django.setup()`
+- Cold-start sequence runs inside the handler on the first invocation (not at module import time) to avoid Lambda init-duration timeouts: `resolve_environment()` → `resolve_secrets_into_env()` → conditional `django.setup()` → `_configure_logging()`
 - A module-level `_cold_start_done` sentinel ensures the sequence runs only once; subsequent warm invocations skip it
 - Both loaders run unconditionally (outside the `DJANGO_SETTINGS_MODULE` check) — the environment secret may provide that var, and individual secrets may depend on environment-loaded vars
+- `_configure_logging()` sets the `lambda_tasks` logger hierarchy to `INFO` (or the level specified by `LAMBDA_TASKS_LOG_LEVEL` env var) so that `task_logger` output appears in CloudWatch
 
 ## Environment Loader
 

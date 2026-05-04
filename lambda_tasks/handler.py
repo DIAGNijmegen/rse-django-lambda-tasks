@@ -15,6 +15,9 @@ warm invocations skip it.
 import logging
 import os
 
+import django
+from django.apps import apps
+
 from lambda_tasks.environment_loader import resolve_environment
 from lambda_tasks.secret_loader import resolve_secrets_into_env
 
@@ -38,14 +41,34 @@ def _perform_cold_start() -> None:
     resolve_environment()
     resolve_secrets_into_env()
 
-    if os.environ.get("DJANGO_SETTINGS_MODULE"):
-        import django
-        from django.apps import apps
+    if os.environ.get("DJANGO_SETTINGS_MODULE") and not apps.ready:
+        django.setup()
 
-        if not apps.ready:
-            django.setup()
+    _configure_logging()
 
     _cold_start_done = True
+
+
+def _configure_logging() -> None:
+    """Ensure the lambda_tasks logger hierarchy emits at INFO so task log lines
+    appear in CloudWatch.
+
+    The AWS Lambda runtime pre-configures the root logger, but child loggers
+    default to WARNING unless explicitly configured. If Django's LOGGING
+    dictConfig has already set a level on the ``lambda_tasks`` logger (i.e. the
+    user explicitly configured it), we leave it alone. Otherwise we default to
+    INFO (or the value of the LAMBDA_TASKS_LOG_LEVEL env var).
+    """
+    lambda_tasks_logger = logging.getLogger("lambda_tasks")
+
+    # level == NOTSET means nobody (neither dictConfig nor user code) has
+    # explicitly configured this logger — safe to apply our default.
+    if lambda_tasks_logger.level != logging.NOTSET:
+        return
+
+    log_level_name = os.environ.get("LAMBDA_TASKS_LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_name, logging.INFO)
+    lambda_tasks_logger.setLevel(log_level)
 
 
 def handler(event: dict, context: object) -> dict:
