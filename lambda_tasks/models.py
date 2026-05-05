@@ -30,9 +30,9 @@ class MaxRetriesExceededError(Exception):
 
 class TaskStatus(models.TextChoices):
     RUNNING = "RUNNING"
-    SUCCESS = "SUCCESS"
+    SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
-    RETRYING = "RETRYING"
+    RETRIED = "RETRIED"
 
 
 class TaskRecord(models.Model):
@@ -115,7 +115,7 @@ class SQSLambdaTaskMessage(BaseModel):
                         "task_name": self.task_name,
                         "kwargs": self.model_dump(mode="json")["kwargs"],
                         "n_retries": self.n_retries,
-                        "status": TaskRecord.TaskStatus.RUNNING,
+                        "status": TaskStatus.RUNNING,
                         "start_time": now(),
                     },
                 )
@@ -157,7 +157,7 @@ class SQSLambdaTaskMessage(BaseModel):
                 elif effective_retry_on and isinstance(error, effective_retry_on):
                     conf = LambdaTasksSettings()
                     if self.n_retries >= conf.MAX_RETRIES:
-                        record.status = TaskRecord.TaskStatus.FAILED
+                        record.status = TaskStatus.FAILED
                         record.traceback = traceback.format_exc()
                         record.end_time = now()
                         record.save(update_fields=["status", "traceback", "end_time"])
@@ -170,7 +170,7 @@ class SQSLambdaTaskMessage(BaseModel):
                             task_name=self.task_name, n_retries=self.n_retries
                         )
                     else:
-                        record.status = TaskRecord.TaskStatus.RETRYING
+                        record.status = TaskStatus.RETRIED
                         record.traceback = traceback.format_exc()
                         record.end_time = now()
                         record.save(update_fields=["status", "traceback", "end_time"])
@@ -198,7 +198,7 @@ class SQSLambdaTaskMessage(BaseModel):
                 else:
                     task_logger.error(error, exc_info=True)
 
-                    record.status = TaskRecord.TaskStatus.FAILED
+                    record.status = TaskStatus.FAILED
                     record.traceback = traceback.format_exc()
                     record.end_time = now()
                     record.save(update_fields=["status", "traceback", "end_time"])
@@ -207,14 +207,14 @@ class SQSLambdaTaskMessage(BaseModel):
                     return
 
             if ignored_exception is None:
-                record.status = TaskRecord.TaskStatus.SUCCESS
+                record.status = TaskStatus.SUCCEEDED
                 record.result = result
                 record.end_time = now()
                 record.save(update_fields=["status", "result", "end_time"])
 
                 task_logger.info(f"Succeeded in {record.duration}")
             else:
-                record.status = TaskRecord.TaskStatus.SUCCESS
+                record.status = TaskStatus.SUCCEEDED
                 record.traceback = ignored_traceback
                 record.end_time = now()
                 record.save(update_fields=["status", "traceback", "end_time"])

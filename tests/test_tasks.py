@@ -13,7 +13,7 @@ from lambda_tasks.tasks import cleanup_task_records
 @pytest.mark.django_db
 class TestCleanupTaskRecordsDeletesOldRecords:
     def _create_record(
-        self, *, age_days: int, status: str = TaskStatus.SUCCESS
+        self, *, age_days: int, status: str = TaskStatus.SUCCEEDED
     ) -> uuid.UUID:
         record_id = uuid.uuid4()
         TaskRecord.objects.create(
@@ -54,7 +54,7 @@ class TestCleanupTaskRecordsDeletesOldRecords:
             task_name="some.task",
             kwargs={},
             n_retries=0,
-            status=TaskStatus.SUCCESS,
+            status=TaskStatus.SUCCEEDED,
             start_time=cutoff_time + timedelta(seconds=1),
             end_time=cutoff_time + timedelta(seconds=2),
         )
@@ -65,10 +65,10 @@ class TestCleanupTaskRecordsDeletesOldRecords:
 
     def test_deletes_all_statuses(self) -> None:
         ids = [
-            self._create_record(age_days=10, status=TaskStatus.SUCCESS),
+            self._create_record(age_days=10, status=TaskStatus.SUCCEEDED),
             self._create_record(age_days=10, status=TaskStatus.FAILED),
             self._create_record(age_days=10, status=TaskStatus.RUNNING),
-            self._create_record(age_days=10, status=TaskStatus.RETRYING),
+            self._create_record(age_days=10, status=TaskStatus.RETRIED),
         ]
 
         cleanup_task_records(retention_days=7)

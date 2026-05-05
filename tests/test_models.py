@@ -66,9 +66,9 @@ class TestTaskRecordStatusChoices:
         "status",
         [
             TaskRecord.TaskStatus.RUNNING,
-            TaskRecord.TaskStatus.SUCCESS,
+            TaskRecord.TaskStatus.SUCCEEDED,
             TaskRecord.TaskStatus.FAILED,
-            TaskRecord.TaskStatus.RETRYING,
+            TaskRecord.TaskStatus.RETRIED,
         ],
     )
     def test_valid_status_choices(self, status):
@@ -83,21 +83,20 @@ class TestTaskRecordStatusChoices:
 
     def test_status_choice_values(self):
         assert TaskRecord.TaskStatus.RUNNING == "RUNNING"
-        assert TaskRecord.TaskStatus.SUCCESS == "SUCCESS"
+        assert TaskRecord.TaskStatus.SUCCEEDED == "SUCCEEDED"
         assert TaskRecord.TaskStatus.FAILED == "FAILED"
-        assert TaskRecord.TaskStatus.RETRYING == "RETRYING"
+        assert TaskRecord.TaskStatus.RETRIED == "RETRIED"
 
-    def test_retrying_status_can_be_saved(self):
+    def test_retried_status_can_be_saved(self):
         record = TaskRecord.objects.create(
             task_name="myapp.tasks.job",
             pk=uuid.uuid4(),
             kwargs={},
             n_retries=0,
-            status=TaskRecord.TaskStatus.RETRYING,
+            status=TaskRecord.TaskStatus.RETRIED,
         )
         assert (
-            TaskRecord.objects.get(pk=record.pk).status
-            == TaskRecord.TaskStatus.RETRYING
+            TaskRecord.objects.get(pk=record.pk).status == TaskRecord.TaskStatus.RETRIED
         )
 
 
@@ -179,7 +178,7 @@ class TestTaskRecordOrmQueryable:
             pk=uuid.uuid4(),
             kwargs={},
             n_retries=0,
-            status=TaskRecord.TaskStatus.SUCCESS,
+            status=TaskRecord.TaskStatus.SUCCEEDED,
         )
         TaskRecord.objects.create(
             task_name="myapp.tasks.job",
@@ -189,7 +188,8 @@ class TestTaskRecordOrmQueryable:
             status=TaskRecord.TaskStatus.FAILED,
         )
         assert (
-            TaskRecord.objects.filter(status=TaskRecord.TaskStatus.SUCCESS).count() == 1
+            TaskRecord.objects.filter(status=TaskRecord.TaskStatus.SUCCEEDED).count()
+            == 1
         )
         assert (
             TaskRecord.objects.filter(status=TaskRecord.TaskStatus.FAILED).count() == 1
@@ -359,7 +359,7 @@ class TestExecuteTaskSuccess:
         with patch("lambda_tasks.models.TimeoutContext"):
             msg.execute_immediately(message_id=message_id)
         record = TaskRecord.objects.get(pk=message_id)
-        assert record.status == TaskRecord.TaskStatus.SUCCESS
+        assert record.status == TaskRecord.TaskStatus.SUCCEEDED
 
     def test_successful_task_record_has_result(self):
         msg = _make_message(_task_name(_task_returns_value), {"x": 7})
@@ -611,7 +611,7 @@ def test_property_13_task_record_lifecycle_success(return_value):
     assert _lifecycle_captured[0]["status"] == TaskRecord.TaskStatus.RUNNING
     assert _lifecycle_captured[0]["start_time"] is not None
     record = TaskRecord.objects.get(pk=inv_id)
-    assert record.status == TaskRecord.TaskStatus.SUCCESS
+    assert record.status == TaskRecord.TaskStatus.SUCCEEDED
     assert record.end_time is not None
     assert record.result == return_value
 
@@ -649,7 +649,7 @@ class TestExecuteTaskDuplicateDelivery:
             msg.execute_immediately(message_id=message_id)  # duplicate
         assert TaskRecord.objects.filter(pk=message_id).count() == 1
         record = TaskRecord.objects.get(pk=message_id)
-        assert record.status == TaskRecord.TaskStatus.SUCCESS
+        assert record.status == TaskRecord.TaskStatus.SUCCEEDED
 
     def test_duplicate_of_failed_is_skipped(self):
         msg = _make_message(_task_name(_task_raises), {"msg": "boom"})
@@ -1081,7 +1081,7 @@ def test_property_ignored_exc_produces_success(exc_type_name):
     with patch("lambda_tasks.models.TimeoutContext"):
         msg.execute_immediately(message_id=message_id)
     record = TaskRecord.objects.get(pk=message_id)
-    assert record.status == TaskRecord.TaskStatus.SUCCESS
+    assert record.status == TaskRecord.TaskStatus.SUCCEEDED
     assert record.traceback is not None
     assert exc_type_name in record.traceback
     assert record.end_time is not None
@@ -1106,7 +1106,7 @@ def test_property_ignored_exc_commits_record(label):
     ).exists()
     # TaskRecord itself must be committed as SUCCESS
     record = TaskRecord.objects.get(pk=message_id)
-    assert record.status == TaskRecord.TaskStatus.SUCCESS
+    assert record.status == TaskRecord.TaskStatus.SUCCEEDED
 
 
 # Feature: ignore-errors-decorator-option, Property 5: Subclass of ignored exception type is also ignored
@@ -1128,7 +1128,7 @@ def test_property_subclass_of_ignored_is_ignored(base_exc):
         with patch("lambda_tasks.models.TimeoutContext"):
             msg.execute_immediately(message_id=message_id)
     record = TaskRecord.objects.get(pk=message_id)
-    assert record.status == TaskRecord.TaskStatus.SUCCESS
+    assert record.status == TaskRecord.TaskStatus.SUCCEEDED
 
 
 # Feature: ignore-errors-decorator-option, Property 6: Non-ignored exception produces FAILED with rollback
@@ -1179,7 +1179,7 @@ class TestIgnoreErrorsRegressionGuard:
         with patch("lambda_tasks.models.TimeoutContext"):
             msg.execute_immediately(message_id=message_id)
         record = TaskRecord.objects.get(pk=message_id)
-        assert record.status == TaskRecord.TaskStatus.SUCCESS
+        assert record.status == TaskRecord.TaskStatus.SUCCEEDED
         assert record.traceback is None
 
     def test_non_ignored_exception_produces_failed(self):
@@ -1227,7 +1227,7 @@ def test_property_eager_mode_ignore_errors_parity(exc_type_name):
     with patch("lambda_tasks.models.import_string", return_value=_task_raises_ignored):
         msg.execute_immediately(message_id=message_id)
     record = TaskRecord.objects.get(pk=message_id)
-    assert record.status == TaskRecord.TaskStatus.SUCCESS
+    assert record.status == TaskRecord.TaskStatus.SUCCEEDED
     assert record.traceback is not None
 
 
@@ -1379,7 +1379,7 @@ def test_property_6_retrying_status_and_traceback(exc_type_name):
             with patch.object(SQSLambdaTask, "execute_on_commit"):
                 msg.execute_immediately(message_id=message_id)
     record = TaskRecord.objects.get(pk=message_id)
-    assert record.status == TaskRecord.TaskStatus.RETRYING
+    assert record.status == TaskRecord.TaskStatus.RETRIED
     assert record.traceback is not None
     assert record.end_time is not None
 
@@ -1855,7 +1855,7 @@ def test_property_singleton_lockerror_retry(
 
     # TaskRecord should be RETRYING with LockError in traceback
     record = TaskRecord.objects.get(pk=message_id)
-    assert record.status == TaskRecord.TaskStatus.RETRYING
+    assert record.status == TaskRecord.TaskStatus.RETRIED
     assert record.traceback is not None
     assert "LockError" in record.traceback
 
@@ -1959,7 +1959,7 @@ class TestSingletonExecutionUnit:
         mock_cache.lock.assert_not_called()
 
         record = TaskRecord.objects.get(pk=message_id)
-        assert record.status == TaskRecord.TaskStatus.SUCCESS
+        assert record.status == TaskRecord.TaskStatus.SUCCEEDED
         assert record.result == 42
 
     def test_singleton_uses_singleton_cache_backend(self, settings: object) -> None:
@@ -2050,7 +2050,7 @@ class TestSingletonIgnoreErrorsPrecedence:
             msg.execute_immediately(message_id=message_id)
 
         record = TaskRecord.objects.get(pk=message_id)
-        assert record.status == TaskRecord.TaskStatus.SUCCESS
+        assert record.status == TaskRecord.TaskStatus.SUCCEEDED
         assert record.traceback is not None
         assert "LockError" in record.traceback
         mock_eoc.assert_not_called()
@@ -2086,7 +2086,7 @@ class TestSingletonIgnoreErrorsPrecedence:
             msg.execute_immediately(message_id=message_id)
 
         record = TaskRecord.objects.get(pk=message_id)
-        assert record.status == TaskRecord.TaskStatus.SUCCESS
+        assert record.status == TaskRecord.TaskStatus.SUCCEEDED
         assert record.traceback is not None
         assert "SoftTimeLimitExceeded" in record.traceback
         mock_eoc.assert_not_called()

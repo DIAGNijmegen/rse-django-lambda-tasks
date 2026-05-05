@@ -666,7 +666,7 @@ def test_property_3_eager_mode_writes_task_record(value):
     assert TaskRecord.objects.filter(
         task_name=task_name,
         kwargs={"n": value},
-        status__in=[TaskRecord.TaskStatus.SUCCESS, TaskRecord.TaskStatus.FAILED],
+        status__in=[TaskRecord.TaskStatus.SUCCEEDED, TaskRecord.TaskStatus.FAILED],
     ).exists()
 
 
