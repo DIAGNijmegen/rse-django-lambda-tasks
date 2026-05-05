@@ -28,15 +28,15 @@ class TaskRecordAdmin(admin.ModelAdmin):
             super()
             .get_queryset(request)
             .annotate(
-                duration=ExpressionWrapper(
+                computed_duration=ExpressionWrapper(
                     F("end_time") - F("start_time"), output_field=DurationField()
                 )
             )
         )
 
-    @admin.display(description="Duration", ordering="duration")
+    @admin.display(description="Duration", ordering="computed_duration")
     def duration(self, obj: TaskRecord) -> str | None:
-        d = getattr(obj, "duration", None)
+        d = getattr(obj, "computed_duration", None)
         if d is None:
             return None
         total_seconds = d.total_seconds()
