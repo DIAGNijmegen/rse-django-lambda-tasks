@@ -22,6 +22,17 @@ class TaskRecordAdmin(admin.ModelAdmin):
     list_filter = ("status", "task_name")
     date_hierarchy = "start_time"
     search_fields = ("pk", "kwargs")
+    readonly_fields = (
+        "pk",
+        "task_name",
+        "kwargs",
+        "n_retries",
+        "status",
+        "start_time",
+        "end_time",
+        "result",
+        "traceback",
+    )
 
     def get_queryset(self, request: HttpRequest) -> QuerySet:
         return (
