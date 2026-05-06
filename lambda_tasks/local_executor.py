@@ -1,9 +1,12 @@
 """Process pool executor for async local task execution."""
 
+import logging
 import uuid
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor
 
 from lambda_tasks.settings import LambdaTasksSettings
+
+logger = logging.getLogger(__name__)
 
 _pool: ProcessPoolExecutor | None = None
 
@@ -38,8 +41,18 @@ def _execute_in_worker(*, message_json: str, message_id: str) -> None:
     message.execute_immediately(message_id=message_id)
 
 
+def _log_worker_exception(future: Future) -> None:  # type: ignore[type-arg]
+    """Callback attached to each worker future. Logs unhandled exceptions."""
+    exception = future.exception()
+    if exception is not None:
+        logger.error("Worker process raised an exception", exc_info=exception)
+
+
 def submit_task(*, message_json: str) -> None:
     """Submit a task to the process pool. Fire-and-forget."""
     pool = get_pool()
     message_id = str(uuid.uuid4())
-    pool.submit(_execute_in_worker, message_json=message_json, message_id=message_id)
+    future = pool.submit(
+        _execute_in_worker, message_json=message_json, message_id=message_id
+    )
+    future.add_done_callback(_log_worker_exception)

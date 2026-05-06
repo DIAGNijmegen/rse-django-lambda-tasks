@@ -344,7 +344,7 @@ class TestSubmitTask:
         assert str(parsed) == message_id
 
     def test_submit_task_does_not_wait_on_future(self, settings):
-        """submit_task() does not call .result() or .add_done_callback() on the Future.
+        """submit_task() does not call .result() on the Future.
 
         Validates: Requirements 3.4, 5.3
         """
@@ -363,7 +363,24 @@ class TestSubmitTask:
             )
 
         mock_future.result.assert_not_called()
-        mock_future.add_done_callback.assert_not_called()
+
+    def test_submit_task_attaches_exception_logging_callback(self, settings):
+        """submit_task() attaches _log_worker_exception as a done callback."""
+        from lambda_tasks.local_executor import _log_worker_exception, submit_task
+
+        settings.LAMBDA_TASKS_LOCAL_WORKERS = 2
+        settings.LAMBDA_TASKS_EAGER = False
+
+        mock_pool = MagicMock()
+        mock_future = MagicMock()
+        mock_pool.submit.return_value = mock_future
+
+        with patch("lambda_tasks.local_executor.get_pool", return_value=mock_pool):
+            submit_task(
+                message_json='{"task_name": "myapp.tasks.foo", "kwargs": {}, "n_retries": 0}'
+            )
+
+        mock_future.add_done_callback.assert_called_once_with(_log_worker_exception)
 
 
 # ---------------------------------------------------------------------------
