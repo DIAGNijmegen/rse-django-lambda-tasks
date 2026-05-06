@@ -64,5 +64,5 @@ STATIC_URL = "static/"
 
 USE_TZ = True
 
-# EAGER mode: tasks execute synchronously in-process (no SQS required)
-LAMBDA_TASKS_EAGER = True
+# Local mode: tasks execute synchronously in-process (no SQS required)
+LAMBDA_TASKS_LOCAL_WORKERS = 2

@@ -40,3 +40,17 @@ class LambdaTasksSettings:
     @property
     def SINGLETON_CACHE(self) -> str:
         return str(getattr(django_settings, "LAMBDA_TASKS_SINGLETON_CACHE", "default"))
+
+    @property
+    def LOCAL_WORKERS(self) -> int:
+        value = int(getattr(django_settings, "LAMBDA_TASKS_LOCAL_WORKERS", 0))
+        if value < 0:
+            raise ImproperlyConfigured(
+                "LAMBDA_TASKS_LOCAL_WORKERS must be a non-negative integer."
+            )
+        if value > 0 and self.EAGER:
+            raise ImproperlyConfigured(
+                "LAMBDA_TASKS_LOCAL_WORKERS and LAMBDA_TASKS_EAGER are mutually exclusive. "
+                "Set one or the other, not both."
+            )
+        return value

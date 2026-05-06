@@ -16,6 +16,7 @@ from django.utils.timezone import now
 from pydantic import BaseModel, ConfigDict, Field
 from redis.exceptions import LockError
 
+from lambda_tasks.local_executor import submit_task
 from lambda_tasks.logging import task_logger
 from lambda_tasks.settings import LambdaTasksSettings
 from lambda_tasks.timeouts import TimeoutContext
@@ -249,6 +250,8 @@ class SQSLambdaTask(BaseModel):
 
         if conf.EAGER:
             self.message.execute_immediately(message_id=str(uuid.uuid4()))
+        elif conf.LOCAL_WORKERS > 0:
+            submit_task(message_json=self.message.model_dump_json())
         else:
             try:
                 queue_url = conf.QUEUES[self.queue]
