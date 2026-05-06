@@ -19,6 +19,7 @@ django-lambda-tasks/
 │   ├── settings.py             # LambdaTasksSettings (lazy Django settings reader)
 │   ├── secret_loader.py        # Resolves LAMBDA_TASKS_SECRET_* env vars at cold start
 │   ├── environment_loader.py    # Loads env vars from Secrets Manager at cold start
+│   ├── local_executor.py        # ProcessPoolExecutor for async local task execution
 │   ├── tasks.py                # Built-in maintenance tasks (cleanup_task_records)
 │   ├── timeouts.py             # TimeoutContext implementation
 │   └── migrations/             # Django migrations for TaskRecord
@@ -39,7 +40,8 @@ django-lambda-tasks/
 ## Module Responsibilities
 
 - `decorators.py` — defines `@lambda_task`; enforces kwargs-only at decoration time
-- `models.py` — `TaskRecord` (Django ORM), `SQSLambdaTaskMessage` (Pydantic, SQS schema + execution logic), `SQSLambdaTask` (Pydantic, holds message + routing; `_execute()` publishes to SQS or executes eagerly; `execute_on_commit()` registers `_execute` with `transaction.on_commit`)
+- `models.py` — `TaskRecord` (Django ORM), `SQSLambdaTaskMessage` (Pydantic, SQS schema + execution logic), `SQSLambdaTask` (Pydantic, holds message + routing; `_execute()` publishes to SQS, executes eagerly, or submits to the local process pool; `execute_on_commit()` registers `_execute` with `transaction.on_commit`)
+- `local_executor.py` — `ProcessPoolExecutor`-based async local execution; `get_pool()` lazily creates a module-level pool; `submit_task()` fire-and-forget submission; `_execute_in_worker()` deserializes and runs the task in a child process; `_pool_initializer()` calls `django.setup()` per worker
 - `handler.py` — Lambda entry point; cold-start init (temporary log handler → `resolve_environment()` → `resolve_secrets_into_env()` → handler removed → conditional `django.setup()`) runs inside the handler on first invocation, guarded by `_cold_start_done` sentinel; processes SQS records independently; returns `batchItemFailures`
 - `environment_loader.py` — loads env vars from a Secrets Manager secret at cold start; validates flat JSON format; idempotent via `_loaded` sentinel
 - `secret_loader.py` — resolves `LAMBDA_TASKS_SECRET_*` env vars from Secrets Manager before Django starts; validates format, detects conflicts, batches API calls; idempotent via `_loaded` sentinel

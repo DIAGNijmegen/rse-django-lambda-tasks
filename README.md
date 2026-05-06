@@ -151,6 +151,33 @@ With eager mode enabled, `.execute_on_commit()` executes the task immediately wi
 
 > **Note:** Timeouts are not enforced in eager mode. `soft_timeout` and `hard_timeout` values are accepted and stored but `TimeoutContext` becomes a no-op — it checks `LAMBDA_TASKS_EAGER` internally and skips `SIGALRM` setup. This is intentional: `SIGALRM`-based timeouts require a Lambda/Unix worker process, not a Django dev server thread.
 
+### Async local execution (development)
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `LAMBDA_TASKS_LOCAL_WORKERS` | `int` | `0` | Number of worker processes for async local execution. When set to a positive integer, tasks run in a background process pool instead of SQS. |
+
+```python
+# settings/local.py
+LAMBDA_TASKS_LOCAL_WORKERS = 4
+```
+
+Async local mode bridges the gap between eager mode and full SQS/Lambda deployment. Tasks execute in background worker processes with true parallelism and full timeout enforcement via `SIGALRM`, without requiring AWS infrastructure.
+
+The execution mode hierarchy is:
+1. **Eager** (`LAMBDA_TASKS_EAGER=True`) — synchronous, in-process, no timeouts
+2. **Async local** (`LAMBDA_TASKS_LOCAL_WORKERS > 0`) — async, separate processes, timeouts enforced
+3. **SQS** (default) — async, Lambda workers, timeouts enforced
+
+Key characteristics:
+- `LAMBDA_TASKS_LOCAL_WORKERS` and `LAMBDA_TASKS_EAGER` are mutually exclusive — setting both raises `ImproperlyConfigured`
+- The process pool is created lazily on first task submission and reused for the server lifetime
+- Each worker process calls `django.setup()` once at startup
+- Tasks are serialized as JSON for IPC (same code path as SQS)
+- Worker failures are isolated from the Django server process — a crashing task does not bring down the dev server
+- `transaction.on_commit` is respected — tasks only submit after the transaction commits
+- Timeouts (`SIGALRM`) are fully enforced because workers are separate OS processes
+
 ---
 
 ## Decorator options

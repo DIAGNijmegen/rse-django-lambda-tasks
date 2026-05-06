@@ -14,7 +14,8 @@ View → @lambda_task.execute_on_commit() → SQS → Lambda handler → SQSLamb
 
 Key modules:
 - `decorators.py` — `@lambda_task` decorator and `LambdaTaskWrapper`
-- `models.py` — `TaskRecord` (Django ORM), `SQSLambdaTaskMessage` (SQS schema + execution), `SQSLambdaTask` (routing + SQS publish)
+- `models.py` — `TaskRecord` (Django ORM), `SQSLambdaTaskMessage` (SQS schema + execution), `SQSLambdaTask` (routing + SQS publish or local pool submit)
+- `local_executor.py` — `ProcessPoolExecutor`-based async local execution for development
 - `handler.py` — AWS Lambda entry point; cold-start init runs on first invocation (not at import time) with partial-batch failure reporting
 - `logging.py` — `task_logger` for invocation-scoped log output
 - `settings.py` — lazy `LambdaTasksSettings` reading from Django settings
@@ -195,6 +196,7 @@ Statuses: `RUNNING`, `SUCCESS`, `FAILED`, `RETRYING`
 | `LAMBDA_TASKS_DEFAULT_SOFT_TIMEOUT` | `270` | Soft timeout in seconds |
 | `LAMBDA_TASKS_DEFAULT_HARD_TIMEOUT` | `300` | Hard timeout in seconds |
 | `LAMBDA_TASKS_EAGER` | `False` | Run tasks synchronously in-process (no SQS) |
+| `LAMBDA_TASKS_LOCAL_WORKERS` | `0` | Number of worker processes for async local execution (development only; mutually exclusive with `EAGER`) |
 | `LAMBDA_TASKS_MAX_RETRIES` | `2880` | Maximum retry attempts before `MaxRetriesExceededError` is raised (60 × 24 × 2) |
 | `LAMBDA_TASKS_SINGLETON_CACHE` | `"default"` | Django cache backend used for singleton task locks |
 
@@ -207,6 +209,36 @@ Set `LAMBDA_TASKS_EAGER = True` to run tasks synchronously in-process (no SQS). 
 In eager mode a random UUID4 is generated as the `message_id` passed to `execute_immediately()`.
 
 **Timeouts are not enforced in eager mode.** `TimeoutContext` is still entered but becomes a no-op — it checks `LAMBDA_TASKS_EAGER` internally and skips `SIGALRM` setup. `SIGALRM`-based timeouts require a Lambda worker process, not a Django dev server thread. Timeout values are still validated at decoration time.
+
+## Async Local Mode
+
+Set `LAMBDA_TASKS_LOCAL_WORKERS` to a positive integer to run tasks in a background `ProcessPoolExecutor`. Tasks are submitted after transaction commit (same as SQS mode) but execute in local worker processes instead of Lambda. This provides true parallelism with timeout enforcement for local development.
+
+```python
+# settings/local.py
+LAMBDA_TASKS_LOCAL_WORKERS = 4
+```
+
+The execution mode hierarchy is:
+1. **Eager mode** (`LAMBDA_TASKS_EAGER=True`) — synchronous, in-process, no timeouts
+2. **Async local mode** (`LOCAL_WORKERS > 0`) — async, separate processes, timeouts enforced
+3. **SQS mode** (default) — async, Lambda workers, timeouts enforced
+
+`LAMBDA_TASKS_LOCAL_WORKERS` and `LAMBDA_TASKS_EAGER` are mutually exclusive — setting both raises `ImproperlyConfigured`. A negative value also raises `ImproperlyConfigured`.
+
+Key behaviours:
+- The process pool is created lazily on first task submission and reused for the server lifetime
+- Each worker process calls `django.setup()` once via the pool initializer
+- Tasks are serialized as JSON strings (via `model_dump_json()`) for IPC — same path as SQS
+- The dispatcher discards the `Future` (fire-and-forget) — worker failures are isolated
+- `SIGALRM`-based timeouts work in worker processes because they are separate OS processes
+- `transaction.on_commit` is respected — tasks only submit after the transaction commits
+
+Implementation lives in `lambda_tasks/local_executor.py`:
+- `get_pool()` — lazily creates and returns the shared `ProcessPoolExecutor`
+- `submit_task(*, message_json: str)` — generates a UUID4 message_id and submits to the pool
+- `_execute_in_worker(*, message_json: str, message_id: str)` — worker entry point; deserializes and calls `execute_immediately()`
+- `_pool_initializer()` — calls `django.setup()` once per worker
 
 ## Logging
 

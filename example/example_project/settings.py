@@ -64,5 +64,19 @@ STATIC_URL = "static/"
 
 USE_TZ = True
 
-# Local mode: tasks execute synchronously in-process (no SQS required)
+# Local mode: tasks execute in process pool (no SQS required)
 LAMBDA_TASKS_LOCAL_WORKERS = 2
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "INFO",
+    },
+}
