@@ -3,8 +3,13 @@
 from django.contrib import admin
 from django.db.models import DurationField, ExpressionWrapper, F, QuerySet
 from django.http import HttpRequest
+from django.utils.module_loading import import_string
 
-from lambda_tasks.models import TaskRecord
+from lambda_tasks.models import (
+    SQSLambdaTask,
+    SQSLambdaTaskMessage,
+    TaskRecord,
+)
 
 
 @admin.register(TaskRecord)
@@ -33,6 +38,7 @@ class TaskRecordAdmin(admin.ModelAdmin):
         "result",
         "traceback",
     )
+    actions = ["replay_tasks"]
 
     def get_queryset(self, request: HttpRequest) -> QuerySet:
         return (
@@ -52,3 +58,18 @@ class TaskRecordAdmin(admin.ModelAdmin):
             return None
         total_seconds = d.total_seconds()
         return f"{total_seconds:.3f}s"
+
+    @admin.action(description="Replay selected tasks", permissions=("change",))
+    def replay_tasks(self, request: HttpRequest, queryset: QuerySet) -> None:
+        for record in queryset:
+            queue = import_string(record.task_name).queue
+            task = SQSLambdaTask(
+                message=SQSLambdaTaskMessage(
+                    task_name=record.task_name,
+                    kwargs=record.kwargs,
+                    n_retries=0,
+                ),
+                delay=0,
+                queue=queue,
+            )
+            task.execute_on_commit()
