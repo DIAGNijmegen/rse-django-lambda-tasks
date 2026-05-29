@@ -14,6 +14,7 @@ warm invocations skip it.
 
 import logging
 import os
+import resource
 
 import django
 from django.apps import apps
@@ -24,6 +25,36 @@ from lambda_tasks.secret_loader import resolve_secrets_into_env
 logger = logging.getLogger(__name__)
 
 _cold_start_done: bool = False
+
+
+_MEMORY_RESERVED_MB = 128
+_MEMORY_MINIMUM_LIMIT_MB = 64
+
+
+def _set_memory_limit() -> None:
+    """Set RLIMIT_DATA from AWS_LAMBDA_FUNCTION_MEMORY_SIZE if available.
+
+    When running in Lambda, this causes Python to raise MemoryError on
+    excessive allocation instead of being killed by the OOM killer.
+
+    128 MB is reserved for the Python runtime, shared libraries, and OS
+    overhead. The limit is floored at 64 MB so that even small Lambdas
+    get some protection.
+    """
+    memory_mb = os.environ.get("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
+
+    if memory_mb is None:
+        return
+
+    limit_bytes = (
+        max(int(memory_mb) - _MEMORY_RESERVED_MB, _MEMORY_MINIMUM_LIMIT_MB)
+        * 1024
+        * 1024
+    )
+    resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+    logger.info(
+        f"Set RLIMIT_AS to {limit_bytes} bytes ({memory_mb} MB - {_MEMORY_RESERVED_MB} MB reserved)"
+    )
 
 
 def _perform_cold_start() -> None:
@@ -48,6 +79,8 @@ def _perform_cold_start() -> None:
     boot_handler.setLevel(logging.DEBUG)
     lambda_tasks_logger.addHandler(boot_handler)
     lambda_tasks_logger.setLevel(logging.DEBUG)
+
+    _set_memory_limit()
 
     try:
         resolve_environment()

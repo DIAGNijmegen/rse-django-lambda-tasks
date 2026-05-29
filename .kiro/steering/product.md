@@ -136,10 +136,11 @@ class SQSLambdaTaskMessage(BaseModel):
 - Returns `{"batchItemFailures": [...]}` for partial-batch failure reporting
 - Only pre-execution failures (malformed message, import error, misconfiguration) are reported as `batchItemFailures` — task logic failures are caught and recorded as `FAILED` TaskRecords without raising
 - Recommended SQS queue settings: `maxReceiveCount=1` with a DLQ configured; automatic retries are not useful since task failures are not re-driven by design
-- Cold-start sequence runs inside the handler on the first invocation (not at module import time) to avoid Lambda init-duration timeouts: a temporary `StreamHandler` is attached to the `lambda_tasks` logger, then `resolve_environment()` → `resolve_secrets_into_env()` (handler removed) → conditional `django.setup()`
+- Cold-start sequence runs inside the handler on the first invocation (not at module import time) to avoid Lambda init-duration timeouts: memory limit is set, a temporary `StreamHandler` is attached to the `lambda_tasks` logger, then `resolve_environment()` → `resolve_secrets_into_env()` (handler removed) → conditional `django.setup()`
 - A module-level `_cold_start_done` sentinel ensures the sequence runs only once; subsequent warm invocations skip it
 - Both loaders run unconditionally (outside the `DJANGO_SETTINGS_MODULE` check) — the environment secret may provide that var, and individual secrets may depend on environment-loaded vars
 - A temporary `StreamHandler` is attached to the `lambda_tasks` logger for the duration of the loaders so their log output is visible before Django's `LOGGING` dictConfig has run; it is removed immediately after so that Django's configuration is the sole authority on logging from that point on
+- `resource.setrlimit(RLIMIT_DATA)` is set from `AWS_LAMBDA_FUNCTION_MEMORY_SIZE` so that excessive allocation raises `MemoryError` instead of triggering the OOM killer
 
 ## Environment Loader
 
