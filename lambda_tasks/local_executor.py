@@ -1,5 +1,6 @@
 """Process pool executor for async local task execution."""
 
+import atexit
 import logging
 import uuid
 from concurrent.futures import Future, ProcessPoolExecutor
@@ -18,6 +19,14 @@ def _pool_initializer() -> None:
     django.setup()
 
 
+def _shutdown_pool() -> None:
+    """Shut down the pool at interpreter exit to release semaphores."""
+    global _pool
+    if _pool is not None:
+        _pool.shutdown(wait=False)
+        _pool = None
+
+
 def get_pool() -> ProcessPoolExecutor:
     """Return the shared ProcessPoolExecutor, creating it on first call."""
     global _pool
@@ -27,6 +36,7 @@ def get_pool() -> ProcessPoolExecutor:
             max_workers=conf.LOCAL_WORKERS,
             initializer=_pool_initializer,
         )
+        atexit.register(_shutdown_pool)
     return _pool
 
 
