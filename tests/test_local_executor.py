@@ -570,6 +570,21 @@ class TestPoolInitializer:
 
         mock_django_setup.assert_called_once()
 
+    def test_pool_initializer_ignores_sigint(self):
+        """_pool_initializer() sets SIGINT to SIG_IGN so workers don't receive Ctrl+C."""
+        import signal
+
+        from lambda_tasks.local_executor import _pool_initializer
+
+        original_handler = signal.getsignal(signal.SIGINT)
+        try:
+            with patch("django.setup"):
+                _pool_initializer()
+
+            assert signal.getsignal(signal.SIGINT) == signal.SIG_IGN
+        finally:
+            signal.signal(signal.SIGINT, original_handler)
+
 
 @pytest.mark.django_db(transaction=True)
 class TestTransactionCommitIntegration:

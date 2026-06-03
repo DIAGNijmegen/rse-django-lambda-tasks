@@ -2,6 +2,7 @@
 
 import atexit
 import logging
+import signal
 import uuid
 from concurrent.futures import Future, ProcessPoolExecutor
 
@@ -13,7 +14,16 @@ _pool: ProcessPoolExecutor | None = None
 
 
 def _pool_initializer() -> None:
-    """Run once per worker process. Sets up Django."""
+    """Run once per worker process.
+
+    Ignores SIGINT so that Ctrl+C is handled exclusively by the parent
+    process, which shuts down the pool cleanly via atexit. This prevents
+    workers from being killed mid-operation and leaking semaphores.
+
+    Then sets up Django for task execution.
+    """
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
     import django
 
     django.setup()
