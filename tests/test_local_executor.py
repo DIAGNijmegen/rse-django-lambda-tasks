@@ -126,12 +126,11 @@ def test_mutual_exclusion_of_eager_and_local_workers(n):
 def _reset_pool():
     """Reset the module-level _pool after each test to avoid cross-test contamination."""
     yield
-    try:
-        import lambda_tasks.local_executor
+    import lambda_tasks.local_executor
 
+    if lambda_tasks.local_executor._pool is not None:
+        lambda_tasks.local_executor._pool.shutdown(wait=True, cancel_futures=True)
         lambda_tasks.local_executor._pool = None
-    except ModuleNotFoundError:
-        pass
 
 
 class TestGetPool:
@@ -216,7 +215,11 @@ def test_pool_created_with_correct_worker_count(n):
             pool = lambda_tasks.local_executor.get_pool()
             assert pool._max_workers == n
         finally:
-            # Always reset to avoid pool reuse across examples
+            # Shut down properly to avoid leaked semaphores
+            if lambda_tasks.local_executor._pool is not None:
+                lambda_tasks.local_executor._pool.shutdown(
+                    wait=True, cancel_futures=True
+                )
             lambda_tasks.local_executor._pool = None
 
 

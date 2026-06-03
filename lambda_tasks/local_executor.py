@@ -23,7 +23,7 @@ def _shutdown_pool() -> None:
     """Shut down the pool at interpreter exit to release semaphores."""
     global _pool
     if _pool is not None:
-        _pool.shutdown(wait=False)
+        _pool.shutdown(wait=True, cancel_futures=True)
         _pool = None
 
 
