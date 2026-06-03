@@ -154,13 +154,17 @@ class LambdaTaskWrapper:
     def _build_task(self, *, kwargs: dict[str, Any]) -> SQSLambdaTask:
         """Pop overrides, validate kwargs, and build a SQSLambdaTask.
 
-        Mutates *kwargs* in-place (pops ``_n_retries``).
+        Mutates *kwargs* in-place (pops ``_n_retries``, ``_delay``).
         Returns ``SQSLambdaTask``.
 
         Raises:
             pydantic.ValidationError: if the remaining kwargs fail type validation.
+            ValueError: if ``_delay`` is outside the allowed range [0, 900].
         """
         n_retries = kwargs.pop("_n_retries", 0)
+        delay = kwargs.pop("_delay", self._delay)
+
+        self._validate_delay(delay=delay)
 
         self._kwargs_model.model_validate(kwargs)
 
@@ -172,7 +176,7 @@ class LambdaTaskWrapper:
 
         return SQSLambdaTask(
             message=message,
-            delay=self._delay,
+            delay=delay,
             queue=self._queue,
         )
 

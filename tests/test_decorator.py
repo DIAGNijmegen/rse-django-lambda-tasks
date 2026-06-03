@@ -82,13 +82,23 @@ class TestLambdaTaskWrapperOnCommit:
 
     def test_on_commit_accepts_delay_override(self):
         wrapper = LambdaTaskWrapper(sample_task)
-        with pytest.raises(pydantic.ValidationError):
+        captured: list = []
+        with patch(
+            "lambda_tasks.models.transaction.on_commit",
+            side_effect=lambda cb: captured.append(cb),
+        ):
             wrapper.execute_on_commit(x=1, _delay=10)
+        assert captured[0].__self__.delay == 10
 
     def test_on_commit_accepts_delay_and_task_kwargs(self):
         wrapper = LambdaTaskWrapper(sample_task)
-        with pytest.raises(pydantic.ValidationError):
+        captured: list = []
+        with patch(
+            "lambda_tasks.models.transaction.on_commit",
+            side_effect=lambda cb: captured.append(cb),
+        ):
             wrapper.execute_on_commit(x=1, y="test", _delay=5)
+        assert captured[0].__self__.delay == 5
 
 
 # ---------------------------------------------------------------------------

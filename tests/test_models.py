@@ -1649,17 +1649,22 @@ def test_normal_execute_on_commit_uses_decorator_delay(settings, decorator_delay
     assert mock_client.send_message.call_args.kwargs["DelaySeconds"] == decorator_delay
 
 
-def test_passing_delay_to_execute_on_commit_raises_validation_error():
-    """Passing _delay to execute_on_commit raises ValidationError (extra='forbid' on kwargs model).
+def test_passing_delay_to_execute_on_commit_overrides_decorator_delay():
+    """Passing _delay to execute_on_commit overrides the decorator delay.
     Validates: Requirements 4.1, 4.2"""
-    from pydantic import ValidationError
+    from unittest.mock import patch
 
-    @lambda_task
+    @lambda_task(delay=10)
     def _task_simple(*, x: int) -> None:
         pass
 
-    with pytest.raises(ValidationError):
+    captured: list = []
+    with patch(
+        "lambda_tasks.models.transaction.on_commit",
+        side_effect=lambda cb: captured.append(cb),
+    ):
         _task_simple.execute_on_commit(x=1, _delay=5)
+    assert captured[0].__self__.delay == 5
 
 
 # ---------------------------------------------------------------------------

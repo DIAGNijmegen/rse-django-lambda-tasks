@@ -251,19 +251,28 @@ def test_queue_property_defaults_to_default():
 # ---------------------------------------------------------------------------
 
 
-def test_passing_delay_kwarg_to_execute_on_commit_raises_validation_error():
-    """Passing _delay to execute_on_commit raises pydantic.ValidationError. Requirement 4.1, 4.2"""
+def test_passing_delay_kwarg_to_execute_on_commit_overrides_decorator_delay():
+    """Passing _delay to _build_task overrides the decorator delay. Requirement 4.1, 4.2"""
     wrapper = LambdaTaskWrapper(_make_func(), delay=10)
-    with pytest.raises(pydantic.ValidationError):
-        wrapper._build_task(kwargs={"x": 1, "_delay": 5})
+    task = wrapper._build_task(kwargs={"x": 1, "_delay": 5})
+    assert task.delay == 5
 
 
 def test_build_task_uses_decorator_delay_not_call_time_override():
-    """_build_task uses the decorator delay, not a call-time override. Requirement 4.3"""
+    """_build_task uses the decorator delay when no _delay override is given. Requirement 4.3"""
     decorator_delay = 42
     wrapper = LambdaTaskWrapper(_make_func(), delay=decorator_delay)
     task = wrapper._build_task(kwargs={"x": 1})
     assert task.delay == decorator_delay
+
+
+def test_build_task_delay_override_validates_range():
+    """_delay outside [0, 900] raises ValueError."""
+    wrapper = LambdaTaskWrapper(_make_func(), delay=10)
+    with pytest.raises(ValueError):
+        wrapper._build_task(kwargs={"x": 1, "_delay": -1})
+    with pytest.raises(ValueError):
+        wrapper._build_task(kwargs={"x": 1, "_delay": 901})
 
 
 # ---------------------------------------------------------------------------

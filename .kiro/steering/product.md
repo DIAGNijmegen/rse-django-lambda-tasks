@@ -39,7 +39,14 @@ def my_task(*, user_id: int, action: str) -> None:
 
 ## Enqueuing
 
-`execute_on_commit()` uses the decorator `delay` value. There are no per-call overrides.
+`execute_on_commit()` uses the decorator `delay` value by default. Pass `_delay=<seconds>` at call time to override the delay for that specific enqueue:
+
+```python
+my_task.execute_on_commit(user_id=1, action="x")            # uses decorator delay
+my_task.execute_on_commit(user_id=1, action="x", _delay=60) # overrides with 60s
+```
+
+The `_delay` override is validated against the same range `[0, 900]` as the decorator `delay`. It only affects the SQS `DelaySeconds` — it has no effect in eager or async-local mode.
 
 ## ignore_errors
 

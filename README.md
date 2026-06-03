@@ -59,6 +59,13 @@ def register(request):
     return HttpResponse("Registered")
 ```
 
+You can override the delay for a specific enqueue by passing `_delay`:
+
+```python
+# Delay this particular invocation by 60 seconds instead of the decorator default
+send_welcome_email.execute_on_commit(user_id=user.id, template="welcome", _delay=60)
+```
+
 ### 3. Configure AWS
 
 See [AWS Lambda and SQS setup](#aws-lambda-and-sqs-setup) for queue and Lambda configuration.
@@ -207,6 +214,24 @@ def my_task(*, arg: str) -> None:
 | `retry_on` | `tuple[type[BaseException], ...]` | `()` | Exception types that trigger an automatic retry (see [Automatic retries](#automatic-retries)). |
 | `retry_delay` | `int` | `0` | Base delay in seconds when enqueuing a retry. Jitter (1–5s) is always added; result capped at 900. Requires `retry_on` to be non-empty. |
 | `singleton` | `bool` | `False` | Prevent concurrent execution via a Redis lock (see [Singleton tasks](#singleton-tasks)). |
+
+### Per-call delay override
+
+The `delay` decorator parameter sets the default SQS `DelaySeconds` for all invocations of a task. To override it for a specific call, pass `_delay` to `execute_on_commit()` or `serialize()`:
+
+```python
+@lambda_task(delay=0)
+def notify_user(*, user_id: int) -> None:
+    ...
+
+# Uses the decorator default (0 seconds)
+notify_user.execute_on_commit(user_id=1)
+
+# Override: delay this specific invocation by 120 seconds
+notify_user.execute_on_commit(user_id=1, _delay=120)
+```
+
+`_delay` is validated against the same `[0, 900]` range as the decorator `delay`. It only affects the SQS `DelaySeconds` — it has no effect in eager or async-local mode.
 
 ---
 
