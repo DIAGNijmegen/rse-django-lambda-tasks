@@ -3,6 +3,7 @@
 import atexit
 import logging
 import signal
+import threading
 import uuid
 from concurrent.futures import Future, ProcessPoolExecutor
 
@@ -11,14 +12,16 @@ from lambda_tasks.settings import LambdaTasksSettings
 logger = logging.getLogger(__name__)
 
 _pool: ProcessPoolExecutor | None = None
+_handlers_installed: bool = False
 
 
 def _pool_initializer() -> None:
     """Run once per worker process.
 
     Ignores SIGINT so that Ctrl+C is handled exclusively by the parent
-    process, which shuts down the pool cleanly via atexit. This prevents
-    workers from being killed mid-operation and leaking semaphores.
+    process, which releases the pool via its SIGINT/SIGTERM handler (and
+    atexit as a fallback). This prevents workers from being killed
+    mid-operation and leaking semaphores.
 
     Then sets up Django for task execution.
     """
@@ -30,11 +33,81 @@ def _pool_initializer() -> None:
 
 
 def _shutdown_pool() -> None:
-    """Shut down the pool at interpreter exit to release semaphores."""
+    """Shut down the pool, releasing its POSIX semaphores promptly.
+
+    On shutdown we must unlink the pool's semaphores quickly, because under
+    ``runserver`` the autoreloader parent SIGKILLs this child almost immediately
+    after Ctrl+C (see ``_install_shutdown_handlers``). ``pool.shutdown(wait=True)``
+    blocks on joining the worker processes — if a worker is slow to exit (e.g.
+    it ran a heavy ``django.setup()``), the semaphores are not unlinked until
+    the worker dies, and the SIGKILL wins the race, leaking the semaphores.
+
+    To avoid that, terminate the worker processes first (a near-instant
+    SIGTERM/SIGKILL to children we own), then shut the pool down without
+    waiting. With the workers already gone, ``concurrent.futures`` releases the
+    queue semaphores immediately.
+    """
     global _pool
     if _pool is not None:
-        _pool.shutdown(wait=True, cancel_futures=True)
+        pool = _pool
         _pool = None
+        processes = getattr(pool, "_processes", None)
+        if processes:
+            for process in list(processes.values()):
+                process.terminate()
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _install_shutdown_handlers() -> None:
+    """Install SIGINT/SIGTERM handlers that release the pool promptly.
+
+    Under Django's ``runserver`` autoreloader the development server runs in a
+    child process spawned by ``subprocess.run()``. On Ctrl+C the terminal
+    delivers SIGINT to the whole process group; the autoreloader parent unwinds
+    out of ``subprocess.run`` and immediately calls ``process.kill()``
+    (SIGKILL) on this child. That is a race: this process must unlink the
+    pool's POSIX semaphores before the SIGKILL lands, otherwise multiprocessing's
+    ``resource_tracker`` reports them as leaked at shutdown.
+
+    Relying on ``atexit`` loses that race in applications with a heavy shutdown
+    sequence, because ``atexit`` runs only after the full interpreter unwind.
+    Instead we shut the pool down as the very first action of the signal
+    handler, then chain to the previously installed handler so normal shutdown
+    behaviour (KeyboardInterrupt, autoreloader exit) is preserved.
+
+    Idempotent and only effective on the main thread — ``signal.signal`` raises
+    ``ValueError`` off the main thread, in which case this is a no-op.
+    """
+    global _handlers_installed
+    if _handlers_installed:
+        return
+
+    if threading.current_thread() is not threading.main_thread():
+        return
+
+    def make_handler(previous):  # type: ignore[no-untyped-def]
+        def handler(signum, frame):  # type: ignore[no-untyped-def]
+            # Release the pool's semaphores first, before the autoreloader
+            # parent can SIGKILL us.
+            _shutdown_pool()
+            if callable(previous):
+                previous(signum, frame)
+            elif previous == signal.SIG_DFL:
+                signal.signal(signum, signal.SIG_DFL)
+                signal.raise_signal(signum)
+            # previous == SIG_IGN: nothing to chain to.
+
+        return handler
+
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous = signal.getsignal(signum)
+            signal.signal(signum, make_handler(previous))
+    except ValueError:
+        # Not on the main thread; cannot install signal handlers here.
+        return
+
+    _handlers_installed = True
 
 
 def get_pool() -> ProcessPoolExecutor:

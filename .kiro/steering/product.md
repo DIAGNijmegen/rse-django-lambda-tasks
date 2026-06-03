@@ -246,7 +246,16 @@ Implementation lives in `lambda_tasks/local_executor.py`:
 - `get_pool()` — lazily creates and returns the shared `ProcessPoolExecutor`
 - `submit_task(*, message_json: str)` — generates a UUID4 message_id and submits to the pool
 - `_execute_in_worker(*, message_json: str, message_id: str)` — worker entry point; deserializes and calls `execute_immediately()`
-- `_pool_initializer()` — calls `django.setup()` once per worker
+- `_pool_initializer()` — calls `django.setup()` once per worker and sets `SIGINT` to `SIG_IGN` so workers ignore Ctrl+C
+- `_install_shutdown_handlers()` — installs main-thread `SIGINT`/`SIGTERM` handlers that release the pool, then chain to the previous handler
+
+### Shutdown and the Ctrl+C semaphore-leak race
+
+`runserver` runs the development server in an autoreloader **child** process spawned via `subprocess.run()`. On Ctrl+C the terminal delivers `SIGINT` to the whole process group; the autoreloader **parent** unwinds out of `subprocess.run` and immediately calls `process.kill()` (`SIGKILL`) on the child. The pool's POSIX semaphores must be unlinked before that `SIGKILL` lands, otherwise multiprocessing's `resource_tracker` prints `There appear to be N leaked semaphore objects to clean up at shutdown`.
+
+Relying on `atexit` alone loses this race in applications with a heavy shutdown sequence (many `atexit` handlers, open DB connections), because `atexit` runs only after the full interpreter unwind — `SIGKILL` arrives first. To win the race, `LambdaTasksConfig.ready()` calls `_install_shutdown_handlers()` when `LOCAL_WORKERS > 0`. The handler shuts the pool down as its **first** action, then chains to the previously installed handler so normal shutdown behaviour (`KeyboardInterrupt`, autoreloader exit) is preserved. `atexit` registration remains as a fallback for non-signal exits. Handler installation is idempotent and only effective on the main thread (`signal.signal` raises off the main thread, in which case it is a no-op).
+
+`_shutdown_pool()` does **not** use `pool.shutdown(wait=True)`. `wait=True` blocks on joining the worker processes, and a worker that ran a heavy `django.setup()` is slow to exit — `concurrent.futures` does not unlink the pool's queue semaphores until the workers actually die, so the parent's near-instant `SIGKILL` still wins and the semaphores leak. Instead `_shutdown_pool()` **terminates the worker processes first** (a near-instant signal to children we own), then calls `pool.shutdown(wait=False, cancel_futures=True)`. With the workers already gone, the queue semaphores are unlinked in milliseconds — fast enough to beat the parent's `SIGKILL`.
 
 ## Logging
 

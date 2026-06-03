@@ -679,3 +679,212 @@ class TestWorkerExceptionIsolation:
 
         # Pool.submit was called twice — pool did not crash
         assert mock_pool.submit.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Shutdown signal handlers (Ctrl+C / SIGINT race with the autoreloader parent)
+# ---------------------------------------------------------------------------
+
+import signal as signal_module
+
+
+@pytest.fixture()
+def _reset_signal_handlers():
+    """Save/restore SIGINT and SIGTERM handlers and the installed sentinel."""
+    import lambda_tasks.local_executor
+
+    original_sigint = signal_module.getsignal(signal_module.SIGINT)
+    original_sigterm = signal_module.getsignal(signal_module.SIGTERM)
+    original_flag = lambda_tasks.local_executor._handlers_installed
+    lambda_tasks.local_executor._handlers_installed = False
+    try:
+        yield
+    finally:
+        signal_module.signal(signal_module.SIGINT, original_sigint)
+        signal_module.signal(signal_module.SIGTERM, original_sigterm)
+        lambda_tasks.local_executor._handlers_installed = original_flag
+
+
+class TestShutdownSignalHandlers:
+    """Tests for the SIGINT/SIGTERM handlers that release the pool promptly.
+
+    Under Django's autoreloader the server runs in a child spawned by
+    subprocess.run(); on Ctrl+C the parent SIGKILLs the child. The child must
+    release the pool's semaphores before that SIGKILL lands, so cleanup happens
+    at the front of signal handling rather than via atexit.
+    """
+
+    @pytest.mark.usefixtures("_reset_signal_handlers")
+    def test_installs_sigint_handler(self):
+        """_install_shutdown_handlers() replaces the SIGINT handler with our own."""
+        from lambda_tasks.local_executor import _install_shutdown_handlers
+
+        _install_shutdown_handlers()
+
+        handler = signal_module.getsignal(signal_module.SIGINT)
+        assert callable(handler)
+        assert handler != signal_module.default_int_handler
+
+    @pytest.mark.usefixtures("_reset_signal_handlers")
+    def test_handler_shuts_pool_down_then_chains_to_previous(self):
+        """The installed handler calls _shutdown_pool() then the previous handler."""
+        import lambda_tasks.local_executor as local_executor
+
+        call_order = []
+
+        def previous_handler(signum, frame):
+            call_order.append("previous")
+
+        signal_module.signal(signal_module.SIGINT, previous_handler)
+
+        with patch.object(
+            local_executor,
+            "_shutdown_pool",
+            side_effect=lambda: call_order.append("shutdown"),
+        ) as mock_shutdown:
+            local_executor._install_shutdown_handlers()
+            installed = signal_module.getsignal(signal_module.SIGINT)
+            installed(signal_module.SIGINT, None)
+
+        mock_shutdown.assert_called_once()
+        assert call_order == ["shutdown", "previous"]
+
+    @pytest.mark.usefixtures("_reset_signal_handlers")
+    def test_idempotent_does_not_double_wrap(self):
+        """Calling twice keeps a single wrapper (no nested chaining of our own handler)."""
+        from lambda_tasks.local_executor import _install_shutdown_handlers
+
+        _install_shutdown_handlers()
+        first = signal_module.getsignal(signal_module.SIGINT)
+        _install_shutdown_handlers()
+        second = signal_module.getsignal(signal_module.SIGINT)
+
+        assert first is second
+
+    @pytest.mark.usefixtures("_reset_signal_handlers")
+    def test_noop_outside_main_thread(self):
+        """Installation is a no-op when not on the main thread (signal.signal would raise)."""
+        import threading
+
+        import lambda_tasks.local_executor as local_executor
+
+        results = {}
+
+        def worker():
+            local_executor._install_shutdown_handlers()
+            results["installed"] = local_executor._handlers_installed
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
+
+        assert results["installed"] is False
+
+
+class TestAppConfigReady:
+    """AppConfig.ready() installs the shutdown handlers only in async-local mode."""
+
+    def test_ready_installs_handlers_when_local_workers_positive(self, settings):
+        from lambda_tasks.apps import LambdaTasksConfig
+
+        settings.LAMBDA_TASKS_LOCAL_WORKERS = 2
+        settings.LAMBDA_TASKS_EAGER = False
+
+        config = LambdaTasksConfig.create("lambda_tasks")
+        with patch(
+            "lambda_tasks.local_executor._install_shutdown_handlers"
+        ) as mock_install:
+            config.ready()
+
+        mock_install.assert_called_once()
+
+    def test_ready_does_not_install_handlers_when_local_workers_zero(self, settings):
+        from lambda_tasks.apps import LambdaTasksConfig
+
+        settings.LAMBDA_TASKS_LOCAL_WORKERS = 0
+        settings.LAMBDA_TASKS_EAGER = False
+
+        config = LambdaTasksConfig.create("lambda_tasks")
+        with patch(
+            "lambda_tasks.local_executor._install_shutdown_handlers"
+        ) as mock_install:
+            config.ready()
+
+        mock_install.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _shutdown_pool() terminate-first behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestShutdownPool:
+    """_shutdown_pool() must release semaphores promptly to win the SIGKILL race.
+
+    pool.shutdown(wait=True) blocks on joining worker processes; if a worker is
+    slow to exit, the autoreloader parent SIGKILLs this process before the
+    semaphores are unlinked. So _shutdown_pool() terminates the workers first,
+    then shuts down without waiting.
+    """
+
+    def test_shutdown_terminates_workers_before_shutdown(self):
+        """_shutdown_pool() calls terminate() on each worker, then shutdown(wait=False)."""
+        import lambda_tasks.local_executor as local_executor
+
+        call_order = []
+
+        process_a = MagicMock()
+        process_a.terminate.side_effect = lambda: call_order.append("terminate_a")
+        process_b = MagicMock()
+        process_b.terminate.side_effect = lambda: call_order.append("terminate_b")
+
+        mock_pool = MagicMock()
+        mock_pool._processes = {"a": process_a, "b": process_b}
+        mock_pool.shutdown.side_effect = lambda **kwargs: call_order.append(
+            f"shutdown:{kwargs}"
+        )
+
+        original_pool = local_executor._pool
+        local_executor._pool = mock_pool
+        try:
+            local_executor._shutdown_pool()
+        finally:
+            local_executor._pool = original_pool
+
+        process_a.terminate.assert_called_once()
+        process_b.terminate.assert_called_once()
+        # Both terminates happen before the shutdown call.
+        assert call_order.index("terminate_a") < call_order.index(
+            "shutdown:{'wait': False, 'cancel_futures': True}"
+        )
+        assert call_order.index("terminate_b") < call_order.index(
+            "shutdown:{'wait': False, 'cancel_futures': True}"
+        )
+        mock_pool.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+
+    def test_shutdown_clears_module_pool(self):
+        """_shutdown_pool() resets the module-level _pool to None."""
+        import lambda_tasks.local_executor as local_executor
+
+        mock_pool = MagicMock()
+        mock_pool._processes = {}
+
+        original_pool = local_executor._pool
+        local_executor._pool = mock_pool
+        try:
+            local_executor._shutdown_pool()
+            assert local_executor._pool is None
+        finally:
+            local_executor._pool = original_pool
+
+    def test_shutdown_is_noop_when_no_pool(self):
+        """_shutdown_pool() does nothing when no pool exists."""
+        import lambda_tasks.local_executor as local_executor
+
+        original_pool = local_executor._pool
+        local_executor._pool = None
+        try:
+            local_executor._shutdown_pool()  # must not raise
+            assert local_executor._pool is None
+        finally:
+            local_executor._pool = original_pool
