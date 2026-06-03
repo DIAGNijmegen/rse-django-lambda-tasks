@@ -1,7 +1,10 @@
+from typing import Final
+
 from django.conf import settings as django_settings
 from django.core.exceptions import ImproperlyConfigured
 
-MAX_TIMEOUT = 900
+MAX_DELAY: Final = 900
+MAX_TIMEOUT: Final = 900
 
 
 class LambdaTasksSettings:

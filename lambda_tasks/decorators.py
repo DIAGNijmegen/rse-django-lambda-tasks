@@ -19,7 +19,7 @@ import pydantic
 from redis.exceptions import LockError
 
 from lambda_tasks.models import SQSLambdaTask, SQSLambdaTaskMessage
-from lambda_tasks.settings import MAX_TIMEOUT, LambdaTasksSettings
+from lambda_tasks.settings import MAX_DELAY, MAX_TIMEOUT, LambdaTasksSettings
 
 
 def _build_kwargs_model(func: types.FunctionType) -> type[pydantic.BaseModel]:
@@ -257,9 +257,9 @@ class LambdaTaskWrapper:
 
     @staticmethod
     def _validate_delay(*, delay: int) -> None:
-        """Raise ValueError if delay is outside the allowed range [0, 900]."""
-        if delay < 0 or delay > 900:
-            raise ValueError(f"delay ({delay}) must be in the range [0, 900].")
+        """Raise ValueError if delay is outside the allowed range [0, MAX_DELAY]."""
+        if delay < 0 or delay > MAX_DELAY:
+            raise ValueError(f"delay ({delay}) must be in the range [0, {MAX_DELAY}].")
 
     @staticmethod
     def _validate_retry_delay(
@@ -267,10 +267,10 @@ class LambdaTaskWrapper:
         retry_delay: int,
         retry_on: tuple[type[BaseException], ...],
     ) -> None:
-        """Raise ValueError if retry_delay is outside [0, 900], or TypeError if retry_delay != 0 and retry_on is empty."""
-        if retry_delay < 0 or retry_delay > 900:
+        """Raise ValueError if retry_delay is outside [0, MAX_DELAY], or TypeError if retry_delay != 0 and retry_on is empty."""
+        if retry_delay < 0 or retry_delay > MAX_DELAY:
             raise ValueError(
-                f"retry_delay ({retry_delay}) must be in the range [0, 900]."
+                f"retry_delay ({retry_delay}) must be in the range [0, {MAX_DELAY}]."
             )
 
         if retry_delay != 0 and not retry_on:
