@@ -189,7 +189,7 @@ class LambdaTaskWrapper:
             pydantic.ValidationError: if kwargs fail the task's declared type annotations.
         """
         task = self._build_task(kwargs=kwargs)
-        return task.model_dump()
+        return task.model_dump(mode="json")
 
     def execute_on_commit(self, **kwargs: Any) -> None:
         """Enqueue the task to run after the current transaction commits."""

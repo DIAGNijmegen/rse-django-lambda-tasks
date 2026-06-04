@@ -4,6 +4,7 @@ Unit tests for LambdaTaskWrapper.to_json (TDD red state — to_json does not exi
 Task 4.1: unit tests only (no hypothesis).
 """
 
+import json
 import uuid
 
 import pytest
@@ -19,8 +20,13 @@ def _task(*, x: int) -> None:
     pass
 
 
+def _uuid_task(*, user_id: uuid.UUID) -> None:
+    pass
+
+
 _wrapper = LambdaTaskWrapper(_task, delay=0, queue="default")
 _wrapper_with_defaults = LambdaTaskWrapper(_task, delay=5, queue="high_memory")
+_uuid_wrapper = LambdaTaskWrapper(_uuid_task, delay=0, queue="default")
 
 
 # ---------------------------------------------------------------------------
@@ -69,11 +75,19 @@ def test_to_json_raises_validation_error_for_missing_required_kwargs():
         _wrapper.serialize()
 
 
+def test_serialize_produces_json_serializable_output_with_uuid_kwargs():
+    """serialize() with UUID kwargs returns a dict that is JSON-serializable."""
+    test_id = uuid.uuid4()
+    result = _uuid_wrapper.serialize(user_id=test_id)
+    # Must be JSON-serializable — this raises TypeError if UUID objects remain
+    json.dumps(result)
+    # The UUID should be serialized as a string
+    assert result["message"]["kwargs"]["user_id"] == str(test_id)
+
+
 # ---------------------------------------------------------------------------
 # Property-based tests (P1, P2)
 # ---------------------------------------------------------------------------
-
-import json
 
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
