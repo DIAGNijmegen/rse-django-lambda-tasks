@@ -101,10 +101,6 @@ class TestLambdaTaskWrapperOnCommit:
         assert captured[0].__self__.delay == 5
 
 
-# ---------------------------------------------------------------------------
-# Task 5.2 — lambda_task decorator factory
-# ---------------------------------------------------------------------------
-
 import inspect
 
 import hypothesis.strategies as st
@@ -158,7 +154,7 @@ class TestBackgroundTaskDecoratorValidation:
             pass
 
         with pytest.raises(TypeError):
-            lambda_task(delay=5)(bad)
+            lambda_task(soft_timeout=60, hard_timeout=120)(bad)
 
     def test_soft_ge_hard_raises_configuration_error(self):
         def good(*, x: int):
@@ -199,7 +195,7 @@ class TestBackgroundTaskDecoratorValidation:
         assert my_task.__wrapped__.__name__ == "my_task"
 
     def test_decorator_with_parens(self):
-        @lambda_task(delay=5)
+        @lambda_task(soft_timeout=60, hard_timeout=120)
         def my_task2(*, value: int):
             """My task 2."""
             return value
@@ -375,13 +371,12 @@ from django.test import TestCase
 QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/000000000000/default"
 
 
-def _make_wrapper(soft_timeout=None, hard_timeout=None, delay=0, queue="default"):
+def _make_wrapper(soft_timeout=None, hard_timeout=None, queue="default"):
     """Helper: create a LambdaTaskWrapper with given defaults."""
     return LambdaTaskWrapper(
         sample_task,
         soft_timeout=soft_timeout,
         hard_timeout=hard_timeout,
-        delay=delay,
         queue=queue,
     )
 
@@ -453,25 +448,25 @@ class TestOnCommitOutsideTransaction:
 
     def test_override_delay_passed_to_enqueue(self, settings):
         settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
-        wrapper = _make_wrapper(delay=30)
+        wrapper = _make_wrapper()
         captured: list = []
         with patch(
             "lambda_tasks.models.transaction.on_commit",
             side_effect=lambda cb: captured.append(cb),
         ):
-            wrapper.execute_on_commit(x=1)
+            wrapper.execute_on_commit(x=1, _delay=30)
         assert captured[0].__self__.delay == 30
 
     def test_wrapper_default_delay_used_when_no_override(self, settings):
         settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
-        wrapper = _make_wrapper(delay=15)
+        wrapper = _make_wrapper()
         captured: list = []
         with patch(
             "lambda_tasks.models.transaction.on_commit",
             side_effect=lambda cb: captured.append(cb),
         ):
             wrapper.execute_on_commit(x=1)
-        assert captured[0].__self__.delay == 15
+        assert captured[0].__self__.delay == 0
 
     def test_override_queue_passed_to_enqueue_is_not_supported(self, settings):
         """_queue is not a supported override — it should be rejected as an unknown kwarg."""

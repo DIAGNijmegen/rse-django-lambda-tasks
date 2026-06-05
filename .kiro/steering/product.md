@@ -24,7 +24,7 @@ Key modules:
 
 ```python
 # Always kwargs-only — positional args raise TypeError at decoration time
-@lambda_task(delay=0, retry_delay=30, soft_timeout=60, hard_timeout=120, queue="default",
+@lambda_task(retry_delay=30, soft_timeout=60, hard_timeout=120, queue="default",
              ignore_errors=(SomeExpectedException,),
              retry_on=(TransientError,),
              singleton=True)
@@ -39,14 +39,14 @@ def my_task(*, user_id: int, action: str) -> None:
 
 ## Enqueuing
 
-`execute_on_commit()` uses the decorator `delay` value by default. Pass `_delay=<seconds>` at call time to override the delay for that specific enqueue:
+`execute_on_commit()` defaults to delay 0. Pass `_delay=<seconds>` at call time to set the SQS delay for that specific enqueue:
 
 ```python
-my_task.execute_on_commit(user_id=1, action="x")            # uses decorator delay
-my_task.execute_on_commit(user_id=1, action="x", _delay=60) # overrides with 60s
+my_task.execute_on_commit(user_id=1, action="x")            # delay 0
+my_task.execute_on_commit(user_id=1, action="x", _delay=60) # 60s delay
 ```
 
-The `_delay` override is validated against the same range `[0, 900]` as the decorator `delay`. It only affects the SQS `DelaySeconds` — it has no effect in eager or async-local mode.
+The `_delay` override is validated against the range `[0, 900]`. It only affects the SQS `DelaySeconds` — it has no effect in eager or async-local mode.
 
 ## ignore_errors
 

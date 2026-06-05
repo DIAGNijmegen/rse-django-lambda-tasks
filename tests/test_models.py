@@ -1461,10 +1461,10 @@ def test_property_8_max_retries_exceeded_raises_and_fails(n_retries, exc_type_na
 
 @pytest.mark.django_db(transaction=True)
 def test_property_11_zero_delay_produces_delay_in_range():
-    """Property 11: zero wrapper delay → retry _delay in [1, 5].
+    """Property 11: zero retry_delay → retry delay in [1, 5].
     Validates: Requirements 5.2"""
 
-    @lambda_task(retry_on=(ValueError,), delay=0)
+    @lambda_task(retry_on=(ValueError,))
     def _task_raises_zero_delay(*, x: int) -> None:
         raise ValueError("zero delay test")
 
@@ -1616,24 +1616,20 @@ def test_retry_delay_zero_produces_jitter_in_range():
         assert 1 <= d <= 5
 
 
-# Feature: retry-delay, Property 6: normal enqueue uses decorator delay
+# Feature: retry-delay, Property 6: normal enqueue defaults delay to 0
 # Validates: Requirements 4.3, 4.4
 @pytest.mark.django_db(transaction=True)
-@given(decorator_delay=st.integers(min_value=0, max_value=900))
+@given(call_delay=st.integers(min_value=0, max_value=900))
 @h_settings(
     max_examples=100,
     suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
 )
-def test_normal_execute_on_commit_uses_decorator_delay(settings, decorator_delay):
-    """Property 6: normal execute_on_commit uses decorator delay, not retry_delay.
+def test_normal_execute_on_commit_uses_call_time_delay(settings, call_delay):
+    """Property 6: normal execute_on_commit uses _delay passed at call time.
     Validates: Requirements 4.3, 4.4"""
     settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
 
-    retry_delay_value = min(decorator_delay + 1, 900) if decorator_delay < 900 else 0
-
-    @lambda_task(
-        delay=decorator_delay, retry_on=(ValueError,), retry_delay=retry_delay_value
-    )
+    @lambda_task(retry_on=(ValueError,), retry_delay=30)
     def _task_for_normal_enqueue(*, x: int) -> None:
         pass
 
@@ -1643,18 +1639,39 @@ def test_normal_execute_on_commit_uses_decorator_delay(settings, decorator_delay
         import django.db.transaction as _transaction
 
         with _transaction.atomic():
-            _task_for_normal_enqueue.execute_on_commit(x=1)
+            _task_for_normal_enqueue.execute_on_commit(x=1, _delay=call_delay)
 
     mock_client.send_message.assert_called_once()
-    assert mock_client.send_message.call_args.kwargs["DelaySeconds"] == decorator_delay
+    assert mock_client.send_message.call_args.kwargs["DelaySeconds"] == call_delay
 
 
-def test_passing_delay_to_execute_on_commit_overrides_decorator_delay():
-    """Passing _delay to execute_on_commit overrides the decorator delay.
+@pytest.mark.django_db(transaction=True)
+def test_normal_execute_on_commit_defaults_delay_to_zero(settings):
+    """execute_on_commit without _delay defaults to 0."""
+    settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
+
+    @lambda_task
+    def _task_no_delay(*, x: int) -> None:
+        pass
+
+    with patch("lambda_tasks.models.boto3") as mock_b3:
+        mock_client = MagicMock()
+        mock_b3.client.return_value = mock_client
+        import django.db.transaction as _transaction
+
+        with _transaction.atomic():
+            _task_no_delay.execute_on_commit(x=1)
+
+    mock_client.send_message.assert_called_once()
+    assert mock_client.send_message.call_args.kwargs["DelaySeconds"] == 0
+
+
+def test_passing_delay_to_execute_on_commit_sets_delay():
+    """Passing _delay to execute_on_commit sets the delay on the task.
     Validates: Requirements 4.1, 4.2"""
     from unittest.mock import patch
 
-    @lambda_task(delay=10)
+    @lambda_task
     def _task_simple(*, x: int) -> None:
         pass
 

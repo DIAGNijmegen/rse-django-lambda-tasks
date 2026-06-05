@@ -65,7 +65,6 @@ class LambdaTaskWrapper:
         self,
         func: types.FunctionType,
         *,
-        delay: int = 0,
         retry_delay: int = 0,
         soft_timeout: int | None = None,
         hard_timeout: int | None = None,
@@ -76,7 +75,6 @@ class LambdaTaskWrapper:
     ) -> None:
         self._validate_func(func=func)
         self._validate_timeouts(soft_timeout=soft_timeout, hard_timeout=hard_timeout)
-        self._validate_delay(delay=delay)
         self._validate_retry_delay(retry_delay=retry_delay, retry_on=retry_on)
         self._validate_ignore_errors(ignore_errors=ignore_errors)
         self._validate_retry_on(retry_on=retry_on)
@@ -86,7 +84,6 @@ class LambdaTaskWrapper:
         functools.update_wrapper(self, func)
 
         self._func: types.FunctionType = func
-        self._delay = delay
         self._retry_delay = retry_delay
         self._soft_timeout = soft_timeout
         self._hard_timeout = hard_timeout
@@ -162,7 +159,7 @@ class LambdaTaskWrapper:
             ValueError: if ``_delay`` is outside the allowed range [0, 900].
         """
         n_retries = kwargs.pop("_n_retries", 0)
-        delay = kwargs.pop("_delay", self._delay)
+        delay = kwargs.pop("_delay", 0)
 
         self._validate_delay(delay=delay)
 
@@ -368,7 +365,6 @@ class LambdaTaskWrapper:
 def lambda_task(
     func: types.FunctionType,
     *,
-    delay: int = ...,
     retry_delay: int = ...,
     soft_timeout: int | None = ...,
     hard_timeout: int | None = ...,
@@ -383,7 +379,6 @@ def lambda_task(
 def lambda_task(
     func: None = None,
     *,
-    delay: int = ...,
     retry_delay: int = ...,
     soft_timeout: int | None = ...,
     hard_timeout: int | None = ...,
@@ -397,7 +392,6 @@ def lambda_task(
 def lambda_task(
     func: types.FunctionType | None = None,
     *,
-    delay: int = 0,
     retry_delay: int = 0,
     soft_timeout: int | None = None,
     hard_timeout: int | None = None,
@@ -413,14 +407,13 @@ def lambda_task(
         @lambda_task
         def my_task(*, x: int): ...
 
-        @lambda_task(delay=5, soft_timeout=60, hard_timeout=120)
+        @lambda_task(soft_timeout=60, hard_timeout=120)
         def my_task(*, x: int): ...
     """
 
     def _decorate(f: types.FunctionType) -> LambdaTaskWrapper:
         wrapper = LambdaTaskWrapper(
             f,
-            delay=delay,
             retry_delay=retry_delay,
             soft_timeout=soft_timeout,
             hard_timeout=hard_timeout,

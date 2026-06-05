@@ -62,7 +62,7 @@ def register(request):
 You can override the delay for a specific enqueue by passing `_delay`:
 
 ```python
-# Delay this particular invocation by 60 seconds instead of the decorator default
+# Delay this particular invocation by 60 seconds
 send_welcome_email.execute_on_commit(user_id=user.id, template="welcome", _delay=60)
 ```
 
@@ -206,7 +206,6 @@ def my_task(*, arg: str) -> None:
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `delay` | `int` | `0` | Seconds to delay the SQS message before it becomes visible to consumers (max 900). |
 | `soft_timeout` | `int \| None` | `None` (uses global default) | Per-task soft timeout in seconds (max 900). |
 | `hard_timeout` | `int \| None` | `None` (uses global default) | Per-task hard timeout in seconds (max 900). |
 | `queue` | `str` | `"default"` | Named queue to route this task to. |
@@ -217,21 +216,21 @@ def my_task(*, arg: str) -> None:
 
 ### Per-call delay override
 
-The `delay` decorator parameter sets the default SQS `DelaySeconds` for all invocations of a task. To override it for a specific call, pass `_delay` to `execute_on_commit()` or `serialize()`:
+By default, `execute_on_commit()` uses a delay of 0 seconds. To set the SQS `DelaySeconds` for a specific call, pass `_delay` to `execute_on_commit()` or `serialize()`:
 
 ```python
-@lambda_task(delay=0)
+@lambda_task
 def notify_user(*, user_id: int) -> None:
     ...
 
-# Uses the decorator default (0 seconds)
+# Default (0 seconds delay)
 notify_user.execute_on_commit(user_id=1)
 
-# Override: delay this specific invocation by 120 seconds
+# Delay this specific invocation by 120 seconds
 notify_user.execute_on_commit(user_id=1, _delay=120)
 ```
 
-`_delay` is validated against the same `[0, 900]` range as the decorator `delay`. It only affects the SQS `DelaySeconds` — it has no effect in eager or async-local mode.
+`_delay` is validated against the range `[0, 900]`. It only affects the SQS `DelaySeconds` — it has no effect in eager or async-local mode.
 
 ---
 

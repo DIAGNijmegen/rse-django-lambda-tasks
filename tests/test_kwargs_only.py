@@ -33,7 +33,7 @@ class TestUnderscorePrefixRejected:
             pass
 
         with pytest.raises(TypeError, match="reserved parameter '_delay'"):
-            lambda_task(delay=5)(bad)
+            lambda_task(soft_timeout=60, hard_timeout=120)(bad)
 
     def test_multiple_underscore_params_raises_on_first(self):
         def bad(*, _a: int, _b: str) -> None:

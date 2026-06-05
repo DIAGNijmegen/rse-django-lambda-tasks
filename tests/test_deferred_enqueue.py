@@ -24,9 +24,9 @@ def _uuid_task(*, user_id: uuid.UUID) -> None:
     pass
 
 
-_wrapper = LambdaTaskWrapper(_task, delay=0, queue="default")
-_wrapper_with_defaults = LambdaTaskWrapper(_task, delay=5, queue="high_memory")
-_uuid_wrapper = LambdaTaskWrapper(_uuid_task, delay=0, queue="default")
+_wrapper = LambdaTaskWrapper(_task, queue="default")
+_wrapper_with_defaults = LambdaTaskWrapper(_task, queue="high_memory")
+_uuid_wrapper = LambdaTaskWrapper(_uuid_task, queue="default")
 
 
 # ---------------------------------------------------------------------------
@@ -43,9 +43,9 @@ def test_to_json_returns_dict_validating_as_deferred_task_message():
 
 
 def test_to_json_uses_decorator_defaults_for_delay_and_queue():
-    """When no _delay/_queue overrides are given, decorator defaults are used."""
+    """When no _delay/_queue overrides are given, defaults are used."""
     result = _wrapper_with_defaults.serialize(x=1)
-    assert result["delay"] == 5
+    assert result["delay"] == 0
     assert result["queue"] == "high_memory"
 
 

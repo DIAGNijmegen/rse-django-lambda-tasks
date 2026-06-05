@@ -148,27 +148,31 @@ def test_property_12_overlapping_retry_on_ignore_errors_raises_type_error(
 
 
 def test_validate_delay_negative_raises_value_error():
-    """delay < 0 raises ValueError. Requirement 2.1"""
+    """delay < 0 raises ValueError at call time. Requirement 2.1"""
+    wrapper = LambdaTaskWrapper(_make_func())
     with pytest.raises(ValueError):
-        LambdaTaskWrapper(_make_func(), delay=-1)
+        wrapper._build_task(kwargs={"x": 1, "_delay": -1})
 
 
 def test_validate_delay_above_max_raises_value_error():
-    """delay > 900 raises ValueError. Requirement 2.1"""
+    """delay > 900 raises ValueError at call time. Requirement 2.1"""
+    wrapper = LambdaTaskWrapper(_make_func())
     with pytest.raises(ValueError):
-        LambdaTaskWrapper(_make_func(), delay=901)
+        wrapper._build_task(kwargs={"x": 1, "_delay": 901})
 
 
 def test_validate_delay_zero_is_accepted():
     """delay=0 is accepted (lower boundary). Requirement 2.3"""
-    wrapper = LambdaTaskWrapper(_make_func(), delay=0)
-    assert wrapper._delay == 0
+    wrapper = LambdaTaskWrapper(_make_func())
+    task = wrapper._build_task(kwargs={"x": 1, "_delay": 0})
+    assert task.delay == 0
 
 
 def test_validate_delay_max_is_accepted():
     """delay=900 is accepted (upper boundary). Requirement 2.3"""
-    wrapper = LambdaTaskWrapper(_make_func(), delay=900)
-    assert wrapper._delay == 900
+    wrapper = LambdaTaskWrapper(_make_func())
+    task = wrapper._build_task(kwargs={"x": 1, "_delay": 900})
+    assert task.delay == 900
 
 
 # ---------------------------------------------------------------------------
@@ -251,24 +255,23 @@ def test_queue_property_defaults_to_default():
 # ---------------------------------------------------------------------------
 
 
-def test_passing_delay_kwarg_to_execute_on_commit_overrides_decorator_delay():
-    """Passing _delay to _build_task overrides the decorator delay. Requirement 4.1, 4.2"""
-    wrapper = LambdaTaskWrapper(_make_func(), delay=10)
+def test_passing_delay_kwarg_to_build_task_sets_delay():
+    """Passing _delay to _build_task sets the delay on the task. Requirement 4.1, 4.2"""
+    wrapper = LambdaTaskWrapper(_make_func())
     task = wrapper._build_task(kwargs={"x": 1, "_delay": 5})
     assert task.delay == 5
 
 
-def test_build_task_uses_decorator_delay_not_call_time_override():
-    """_build_task uses the decorator delay when no _delay override is given. Requirement 4.3"""
-    decorator_delay = 42
-    wrapper = LambdaTaskWrapper(_make_func(), delay=decorator_delay)
+def test_build_task_defaults_delay_to_zero():
+    """_build_task defaults delay to 0 when no _delay override is given. Requirement 4.3"""
+    wrapper = LambdaTaskWrapper(_make_func())
     task = wrapper._build_task(kwargs={"x": 1})
-    assert task.delay == decorator_delay
+    assert task.delay == 0
 
 
 def test_build_task_delay_override_validates_range():
     """_delay outside [0, 900] raises ValueError."""
-    wrapper = LambdaTaskWrapper(_make_func(), delay=10)
+    wrapper = LambdaTaskWrapper(_make_func())
     with pytest.raises(ValueError):
         wrapper._build_task(kwargs={"x": 1, "_delay": -1})
     with pytest.raises(ValueError):
@@ -337,10 +340,11 @@ def test_property_retry_delay_2_requires_retry_on(retry_delay):
 @given(value=st.integers().filter(lambda x: x < 0 or x > 900))
 @h_settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
 def test_property_retry_delay_3_out_of_range_raises_value_error(value):
-    """Property 3: for any integer outside [0, 900], both delay and retry_delay raise ValueError.
+    """Property 3: for any integer outside [0, 900], both _delay at call time and retry_delay raise ValueError.
     Validates: Requirements 2.1, 2.2"""
+    wrapper = LambdaTaskWrapper(_make_func())
     with pytest.raises(ValueError):
-        LambdaTaskWrapper(_make_func(), delay=value)
+        wrapper._build_task(kwargs={"x": 1, "_delay": value})
     with pytest.raises(ValueError):
         LambdaTaskWrapper(_make_func(), retry_delay=value, retry_on=(ValueError,))
 
