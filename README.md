@@ -191,7 +191,6 @@ Key characteristics:
 
 ```python
 @lambda_task(
-    delay=0,               # seconds — SQS DelaySeconds before message becomes visible
     soft_timeout=60,       # seconds — overrides global default for this task
     hard_timeout=90,       # seconds — overrides global default for this task
     queue="default",       # named queue from LAMBDA_TASKS_QUEUES
