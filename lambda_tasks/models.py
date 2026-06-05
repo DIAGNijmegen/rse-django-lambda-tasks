@@ -139,7 +139,10 @@ class SQSLambdaTaskMessage(BaseModel):
                     blocking_timeout=0,
                     timeout=hard_timeout,
                 )
-                effective_retry_on = (LockError, *wrapper.retry_on)
+                if wrapper.retry_singleton:
+                    effective_retry_on = (LockError, *wrapper.retry_on)
+                else:
+                    effective_retry_on = wrapper.retry_on
             else:
                 lock_ctx = contextlib.nullcontext()
                 effective_retry_on = wrapper.retry_on
@@ -152,7 +155,11 @@ class SQSLambdaTaskMessage(BaseModel):
                         ):
                             result = wrapper(**self.kwargs)
             except Exception as error:
-                if wrapper.ignore_errors and isinstance(error, wrapper.ignore_errors):
+                if (
+                    wrapper.singleton
+                    and not wrapper.retry_singleton
+                    and isinstance(error, LockError)
+                ):
                     ignored_exception = error
                     ignored_traceback = traceback.format_exc()
                 elif effective_retry_on and isinstance(error, effective_retry_on):

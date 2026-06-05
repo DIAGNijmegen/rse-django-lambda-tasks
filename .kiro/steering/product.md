@@ -25,9 +25,8 @@ Key modules:
 ```python
 # Always kwargs-only — positional args raise TypeError at decoration time
 @lambda_task(retry_delay=30, soft_timeout=60, hard_timeout=120, queue="default",
-             ignore_errors=(SomeExpectedException,),
              retry_on=(TransientError,),
-             singleton=True)
+             singleton=True, retry_singleton=True)
 def my_task(*, user_id: int, action: str) -> None:
     ...
 ```
@@ -48,26 +47,6 @@ my_task.execute_on_commit(user_id=1, action="x", _delay=60) # 60s delay
 
 The `_delay` override is validated against the range `[0, 900]`. It only affects the SQS `DelaySeconds` — it has no effect in eager or async-local mode.
 
-## ignore_errors
-
-Pass a tuple of exception types to `ignore_errors` on `@lambda_task`. If the task raises an instance of any of those types (or a subclass), the executor treats it as a non-fatal outcome:
-
-- `TaskRecord.status` is set to `SUCCESS`
-- The exception traceback is saved to `TaskRecord.traceback` for observability
-- Task-side ORM writes inside the `transaction.atomic()` block are still rolled back
-- The `TaskRecord` update itself is committed outside the atomic block
-
-Exceptions not listed in `ignore_errors` continue to produce `FAILED` with a rollback. Omitting `ignore_errors` (or passing `()`) preserves the existing behaviour.
-
-```python
-@lambda_task(ignore_errors=(RecordNotFound,))
-def sync_user(*, user_id: int) -> None:
-    # RecordNotFound → SUCCESS + traceback recorded; anything else → FAILED
-    ...
-```
-
-`ignore_errors` is validated at decoration time — passing a non-exception type raises `TypeError` immediately. It is stored on `LambdaTaskWrapper` and read by the executor at execution time; it is never serialised into the SQS message.
-
 ## retry_on
 
 Pass a tuple of exception types to `retry_on` on `@lambda_task`. If the task raises an instance of any of those types (or a subclass), the executor automatically re-enqueues the task with the same kwargs and an incremented `n_retries` counter on the `SQSLambdaTaskMessage`.
@@ -75,8 +54,6 @@ Pass a tuple of exception types to `retry_on` on `@lambda_task`. If the task rai
 - `TaskRecord.status` is set to `RETRYING` and the traceback is recorded
 - The retry is a new invocation — the current record is terminal at `RETRYING`
 - Retries continue until `n_retries` reaches `LAMBDA_TASKS_MAX_RETRIES`, at which point `MaxRetriesExceededError` is raised and the record is saved as `FAILED`
-- `ignore_errors` is checked first — a type in both `ignore_errors` and `retry_on` is treated as ignored (SUCCESS), not retried
-- `retry_on` and `ignore_errors` must not overlap (exact match or subclass relationship); overlapping raises `TypeError` at decoration time
 
 ```python
 @lambda_task(retry_on=(RateLimitError, ConnectionError))
@@ -97,7 +74,8 @@ Pass `singleton=True` on `@lambda_task` to prevent concurrent execution of the s
 
 - Lock key format: `lambda_tasks.singleton_lock.{task_name}`
 - The lock is acquired with `blocking_timeout=0` (fail immediately if held) and `timeout=hard_timeout` (auto-expire if the worker crashes)
-- If the lock cannot be acquired (`LockError`), the executor treats it as a retryable exception — same code path as `retry_on`. The `TaskRecord` is set to `RETRYING`, the traceback is recorded, and the task is re-enqueued with `n_retries + 1`
+- If the lock cannot be acquired (`LockError`) and `retry_singleton=True` (default), the executor treats it as a retryable exception — same code path as `retry_on`. The `TaskRecord` is set to `RETRYING`, the traceback is recorded, and the task is re-enqueued with `n_retries + 1`
+- If `retry_singleton=False`, lock contention is treated as a successful no-op — `TaskRecord` is set to `SUCCESS` with the traceback recorded, and no retry is enqueued
 - If `n_retries` has reached `LAMBDA_TASKS_MAX_RETRIES`, `MaxRetriesExceededError` is raised and the record is saved as `FAILED`
 - The cache backend used for locks is controlled by `LAMBDA_TASKS_SINGLETON_CACHE` (default `"default"`)
 
@@ -106,9 +84,14 @@ Pass `singleton=True` on `@lambda_task` to prevent concurrent execution of the s
 def sync_inventory(*, warehouse_id: int) -> None:
     # Only one instance runs at a time; LockError → RETRYING + re-enqueued
     ...
+
+@lambda_task(singleton=True, retry_singleton=False)
+def sync_inventory(*, warehouse_id: int) -> None:
+    # Only one instance runs at a time; LockError → SUCCESS + traceback (no retry)
+    ...
 ```
 
-`singleton` is stored on `LambdaTaskWrapper` and read by the executor at execution time; it is never serialised into the SQS message.
+`singleton` and `retry_singleton` are stored on `LambdaTaskWrapper` and read by the executor at execution time; they are never serialised into the SQS message.
 
 ## SQS Message Schema (`SQSLambdaTaskMessage`)
 
@@ -130,8 +113,8 @@ class SQSLambdaTaskMessage(BaseModel):
 4. If `wrapper.singleton` is `True`, acquires a Redis lock via `caches[SINGLETON_CACHE].lock(lock_key)` wrapping the atomic block; if `False`, no lock is acquired
 5. Runs task inside `transaction.atomic()` + `TimeoutContext`
 6. On success: updates record to `SUCCESS` with result and `end_time`
-7. On ignored exception (type matches `ignore_errors`): rolls back task-side writes, commits record as `SUCCESS` with traceback and `end_time`
-8. On retryable exception (type matches `retry_on` or `LockError` for singleton tasks, `n_retries < MAX_RETRIES`): rolls back task-side writes, enqueues retry via `execute_on_commit` with `n_retries + 1`, commits record as `RETRYING` with traceback and `end_time`
+7. On `LockError` when `singleton=True` and `retry_singleton=False`: rolls back task-side writes, commits record as `SUCCESS` with traceback and `end_time`
+8. On retryable exception (type matches `retry_on` or `LockError` for singleton tasks with `retry_singleton=True`, `n_retries < MAX_RETRIES`): rolls back task-side writes, enqueues retry via `execute_on_commit` with `n_retries + 1`, commits record as `RETRYING` with traceback and `end_time`
 9. On retryable exception with `n_retries >= MAX_RETRIES`: commits record as `FAILED` with traceback, raises `MaxRetriesExceededError`
 10. On any other exception: rolls back atomic block, updates record to `FAILED` with traceback and `end_time`
 

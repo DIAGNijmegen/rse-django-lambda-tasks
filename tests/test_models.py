@@ -21,7 +21,6 @@ from redis.exceptions import LockError
 from lambda_tasks.decorators import lambda_task
 from lambda_tasks.models import SQSLambdaTask, SQSLambdaTaskMessage, TaskRecord
 from lambda_tasks.settings import LambdaTasksSettings
-from lambda_tasks.timeouts import SoftTimeLimitExceeded
 
 # ---------------------------------------------------------------------------
 # TaskRecord model — field, constraint, and ORM tests
@@ -993,245 +992,6 @@ def test_property_on_commit_eager_mode(settings, msg):
 
 
 # ---------------------------------------------------------------------------
-# Feature: ignore-errors-decorator-option — module-level task helpers
-# ---------------------------------------------------------------------------
-
-_IGNORABLE_EXC_TYPES = [
-    ValueError,
-    RuntimeError,
-    KeyError,
-    TypeError,
-    OSError,
-    AttributeError,
-]
-_ignorable_exc_type_st = st.sampled_from(_IGNORABLE_EXC_TYPES)
-_ignore_errors_tuple_st = st.lists(_ignorable_exc_type_st, min_size=1, max_size=3).map(
-    tuple
-)
-
-
-@lambda_task(
-    ignore_errors=(
-        ValueError,
-        RuntimeError,
-        KeyError,
-        TypeError,
-        OSError,
-        AttributeError,
-    )
-)
-def _task_raises_ignored(*, exc_type_name: str) -> None:
-    """Raises the named exception type — used by ignore_errors property tests."""
-    exc_map = {
-        "ValueError": ValueError,
-        "RuntimeError": RuntimeError,
-        "KeyError": KeyError,
-        "TypeError": TypeError,
-        "OSError": OSError,
-        "AttributeError": AttributeError,
-    }
-    raise exc_map[exc_type_name]("ignored error")
-
-
-@lambda_task
-def _task_raises_value_error_no_ignore(*, msg: str) -> None:
-    """Raises ValueError with no ignore_errors — used to test non-ignored path."""
-    raise ValueError(msg)
-
-
-@lambda_task(ignore_errors=(ValueError,))
-def _task_creates_record_then_raises_ignored(*, label: str) -> None:
-    """Creates a TaskRecord inside the atomic block, then raises an ignored exception."""
-    TaskRecord.objects.create(
-        task_name=f"ignored_side_effect_{label}",
-        pk=uuid.uuid4(),
-        kwargs={"label": label},
-        n_retries=0,
-        status=TaskRecord.TaskStatus.RUNNING,
-    )
-    raise ValueError("ignored — side effects should be rolled back")
-
-
-# ---------------------------------------------------------------------------
-# Feature: ignore-errors-decorator-option — Properties 3–6
-# ---------------------------------------------------------------------------
-
-_EXC_TYPE_NAMES = [
-    "ValueError",
-    "RuntimeError",
-    "KeyError",
-    "TypeError",
-    "OSError",
-    "AttributeError",
-]
-_exc_type_name_st = st.sampled_from(_EXC_TYPE_NAMES)
-
-
-# Feature: ignore-errors-decorator-option, Property 3: Ignored exception produces SUCCESS with traceback and end_time
-@pytest.mark.django_db(transaction=True)
-@given(exc_type_name=_exc_type_name_st)
-@h_settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
-def test_property_ignored_exc_produces_success(exc_type_name):
-    """Property 3: ignored exception → status=SUCCESS, non-null traceback containing exc name, non-null end_time.
-    Validates: Requirements 2.1, 2.3, 2.4, 5.1"""
-    msg = _make_message(
-        _task_name(_task_raises_ignored), {"exc_type_name": exc_type_name}
-    )
-    message_id = str(uuid.uuid4())
-    with patch("lambda_tasks.models.TimeoutContext"):
-        msg.execute_immediately(message_id=message_id)
-    record = TaskRecord.objects.get(pk=message_id)
-    assert record.status == TaskRecord.TaskStatus.SUCCEEDED
-    assert record.traceback is not None
-    assert exc_type_name in record.traceback
-    assert record.end_time is not None
-
-
-# Feature: ignore-errors-decorator-option, Property 4: Ignored exception commits the transaction
-@pytest.mark.django_db(transaction=True)
-@given(label=_label_strategy)
-@h_settings(max_examples=30, suppress_health_check=[HealthCheck.too_slow])
-def test_property_ignored_exc_commits_record(label):
-    """Property 4: ignored exception → task-side ORM writes rolled back, TaskRecord committed as SUCCESS.
-    Validates: Requirements 2.2"""
-    msg = _make_message(
-        _task_name(_task_creates_record_then_raises_ignored), {"label": label}
-    )
-    message_id = str(uuid.uuid4())
-    with patch("lambda_tasks.models.TimeoutContext"):
-        msg.execute_immediately(message_id=message_id)
-    # Task-side write must be rolled back
-    assert not TaskRecord.objects.filter(
-        task_name=f"ignored_side_effect_{label}"
-    ).exists()
-    # TaskRecord itself must be committed as SUCCESS
-    record = TaskRecord.objects.get(pk=message_id)
-    assert record.status == TaskRecord.TaskStatus.SUCCEEDED
-
-
-# Feature: ignore-errors-decorator-option, Property 5: Subclass of ignored exception type is also ignored
-@pytest.mark.django_db(transaction=True)
-@given(base_exc=_ignorable_exc_type_st)
-@h_settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
-def test_property_subclass_of_ignored_is_ignored(base_exc):
-    """Property 5: subclass of an ignored exception type is also treated as ignored → SUCCESS.
-    Validates: Requirements 2.5"""
-    SubExc = type(f"Sub{base_exc.__name__}", (base_exc,), {})
-
-    @lambda_task(ignore_errors=(base_exc,))
-    def _task_raises_subclass(*, x: int) -> None:
-        raise SubExc("subclass error")
-
-    msg = _make_message(_task_name(_task_raises_subclass), {"x": 1})
-    message_id = str(uuid.uuid4())
-    with patch("lambda_tasks.models.import_string", return_value=_task_raises_subclass):
-        with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately(message_id=message_id)
-    record = TaskRecord.objects.get(pk=message_id)
-    assert record.status == TaskRecord.TaskStatus.SUCCEEDED
-
-
-# Feature: ignore-errors-decorator-option, Property 6: Non-ignored exception produces FAILED with rollback
-@pytest.mark.django_db(transaction=True)
-@given(exc_type=_ignorable_exc_type_st)
-@h_settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
-def test_property_non_ignored_exc_produces_failed(exc_type):
-    """Property 6: exception not in ignore_errors → status=FAILED, task-side writes rolled back, traceback non-null.
-    Validates: Requirements 3.1, 3.2, 3.3, 3.4"""
-
-    # Use a wrapper with empty ignore_errors so nothing is ignored
-    @lambda_task
-    def _task_raises_exc(*, label: str) -> None:
-        TaskRecord.objects.create(
-            task_name=f"non_ignored_side_effect_{label}",
-            pk=uuid.uuid4(),
-            kwargs={"label": label},
-            n_retries=0,
-            status=TaskRecord.TaskStatus.RUNNING,
-        )
-        raise exc_type("non-ignored error")
-
-    label = "prop6"
-    msg = _make_message(_task_name(_task_raises_exc), {"label": label})
-    message_id = str(uuid.uuid4())
-    with patch("lambda_tasks.models.import_string", return_value=_task_raises_exc):
-        with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately(message_id=message_id)
-    assert not TaskRecord.objects.filter(
-        task_name=f"non_ignored_side_effect_{label}"
-    ).exists()
-    record = TaskRecord.objects.get(pk=message_id)
-    assert record.status == TaskRecord.TaskStatus.FAILED
-    assert record.traceback is not None
-
-
-# ---------------------------------------------------------------------------
-# Feature: ignore-errors-decorator-option — Task 5: regression guard unit tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.django_db(transaction=True)
-class TestIgnoreErrorsRegressionGuard:
-    def test_clean_success_traceback_remains_none(self):
-        """Regression guard: successful task must leave traceback as None (Requirement 5.2)."""
-        msg = _make_message(_task_name(_task_returns_value), {"x": 3})
-        message_id = str(uuid.uuid4())
-        with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately(message_id=message_id)
-        record = TaskRecord.objects.get(pk=message_id)
-        assert record.status == TaskRecord.TaskStatus.SUCCEEDED
-        assert record.traceback is None
-
-    def test_non_ignored_exception_produces_failed(self):
-        """Regression guard: non-ignored exception → FAILED, traceback non-null, task writes rolled back."""
-        msg = _make_message(
-            _task_name(_task_creates_record_then_raises), {"label": "regression_guard"}
-        )
-        message_id = str(uuid.uuid4())
-        with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately(message_id=message_id)
-        assert not TaskRecord.objects.filter(task_name="side_effect_record").exists()
-        record = TaskRecord.objects.get(pk=message_id)
-        assert record.status == TaskRecord.TaskStatus.FAILED
-        assert record.traceback is not None
-
-    def test_empty_ignore_errors_all_exceptions_produce_failed(self):
-        """Regression guard: ignore_errors=() (default) → all exceptions still produce FAILED."""
-        msg = _make_message(_task_name(_task_raises), {"msg": "default_ignore_errors"})
-        message_id = str(uuid.uuid4())
-        with patch("lambda_tasks.models.TimeoutContext"):
-            msg.execute_immediately(message_id=message_id)
-        record = TaskRecord.objects.get(pk=message_id)
-        assert record.status == TaskRecord.TaskStatus.FAILED
-
-
-# ---------------------------------------------------------------------------
-# Feature: ignore-errors-decorator-option — Property 7: eager mode parity
-# ---------------------------------------------------------------------------
-
-from django.test import override_settings
-
-
-# Feature: ignore-errors-decorator-option, Property 7: Eager mode applies the same ignore_errors logic
-@pytest.mark.django_db(transaction=True)
-@given(exc_type_name=_exc_type_name_st)
-@h_settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
-@override_settings(LAMBDA_TASKS_EAGER=True)
-def test_property_eager_mode_ignore_errors_parity(exc_type_name):
-    """Property 7: eager mode applies the same ignore_errors logic — ignored exception → SUCCESS.
-    Validates: Requirements 4.3"""
-    msg = _make_message(
-        _task_name(_task_raises_ignored), {"exc_type_name": exc_type_name}
-    )
-    message_id = str(uuid.uuid4())
-    with patch("lambda_tasks.models.import_string", return_value=_task_raises_ignored):
-        msg.execute_immediately(message_id=message_id)
-    record = TaskRecord.objects.get(pk=message_id)
-    assert record.status == TaskRecord.TaskStatus.SUCCEEDED
-    assert record.traceback is not None
-
-
-# ---------------------------------------------------------------------------
 # Feature: task-retry — Property 3: _n_retries non-negative validation
 # ---------------------------------------------------------------------------
 
@@ -2022,29 +1782,24 @@ class TestSingletonExecutionUnit:
 
 
 # ---------------------------------------------------------------------------
-# Feature: singleton-task — ignore_errors precedence over implicit retry_on
+# Feature: singleton-task — retry_singleton=False produces SUCCESS on LockError
 # ---------------------------------------------------------------------------
 
 
-@lambda_task(singleton=True, ignore_errors=(LockError,))
-def _task_singleton_ignore_lock_error(*, x: int) -> int:
+@lambda_task(singleton=True, retry_singleton=False)
+def _task_singleton_no_retry(*, x: int) -> int:
     return x
 
 
-@lambda_task(singleton=True, ignore_errors=(SoftTimeLimitExceeded,))
-def _task_singleton_ignore_soft_timeout(*, x: int) -> int:
-    raise SoftTimeLimitExceeded()
-
-
 @pytest.mark.django_db(transaction=True)
-class TestSingletonIgnoreErrorsPrecedence:
-    """Verify that ignore_errors takes precedence over the implicit LockError
-    retry added by singleton=True, and over SoftTimeLimitExceeded."""
+class TestSingletonRetrySingletonFalse:
+    """Verify that retry_singleton=False causes LockError to produce SUCCESS
+    with traceback instead of triggering a retry."""
 
-    def test_ignored_lock_error_produces_success_not_retry(self) -> None:
-        """LockError in ignore_errors → SUCCESS with traceback, not RETRYING."""
+    def test_lock_error_produces_success_not_retry(self) -> None:
+        """LockError with retry_singleton=False → SUCCESS with traceback, not RETRYING."""
         msg = SQSLambdaTaskMessage(
-            task_name=_task_name(_task_singleton_ignore_lock_error),
+            task_name=_task_name(_task_singleton_no_retry),
             kwargs={"x": 1},
             n_retries=0,
         )
@@ -2060,7 +1815,7 @@ class TestSingletonIgnoreErrorsPrecedence:
         with (
             patch(
                 "lambda_tasks.models.import_string",
-                return_value=_task_singleton_ignore_lock_error,
+                return_value=_task_singleton_no_retry,
             ),
             patch("lambda_tasks.models.TimeoutContext"),
             patch(
@@ -2077,17 +1832,17 @@ class TestSingletonIgnoreErrorsPrecedence:
         assert "LockError" in record.traceback
         mock_eoc.assert_not_called()
 
-    def test_ignored_soft_timeout_produces_success_not_retry(self) -> None:
-        """SoftTimeLimitExceeded in ignore_errors → SUCCESS with traceback, not RETRYING."""
+    def test_retry_singleton_true_still_retries_on_lock_error(self) -> None:
+        """retry_singleton=True (default) → LockError triggers RETRYING."""
         msg = SQSLambdaTaskMessage(
-            task_name=_task_name(_task_singleton_ignore_soft_timeout),
+            task_name=_task_name(_task_singleton_noop),
             kwargs={"x": 1},
             n_retries=0,
         )
         message_id = str(uuid.uuid4())
 
         mock_lock = MagicMock()
-        mock_lock.__enter__ = MagicMock(return_value=mock_lock)
+        mock_lock.__enter__ = MagicMock(side_effect=LockError("contention"))
         mock_lock.__exit__ = MagicMock(return_value=False)
 
         mock_cache = MagicMock()
@@ -2096,7 +1851,7 @@ class TestSingletonIgnoreErrorsPrecedence:
         with (
             patch(
                 "lambda_tasks.models.import_string",
-                return_value=_task_singleton_ignore_soft_timeout,
+                return_value=_task_singleton_noop,
             ),
             patch("lambda_tasks.models.TimeoutContext"),
             patch(
@@ -2108,7 +1863,7 @@ class TestSingletonIgnoreErrorsPrecedence:
             msg.execute_immediately(message_id=message_id)
 
         record = TaskRecord.objects.get(pk=message_id)
-        assert record.status == TaskRecord.TaskStatus.SUCCEEDED
+        assert record.status == TaskRecord.TaskStatus.RETRIED
         assert record.traceback is not None
-        assert "SoftTimeLimitExceeded" in record.traceback
-        mock_eoc.assert_not_called()
+        assert "LockError" in record.traceback
+        mock_eoc.assert_called_once()

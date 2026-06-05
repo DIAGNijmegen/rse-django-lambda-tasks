@@ -9,6 +9,7 @@ import pytest
 from hypothesis import HealthCheck, given
 from hypothesis import settings as h_settings
 from hypothesis import strategies as st
+from redis.exceptions import LockError
 
 from lambda_tasks.decorators import LambdaTaskWrapper, lambda_task
 
@@ -58,12 +59,12 @@ def test_invalid_retry_on_element_raises_type_error():
 
 
 def test_overlapping_retry_on_and_ignore_errors_raises_type_error():
-    """Overlapping retry_on and ignore_errors raises TypeError at decoration time. Requirement 1.5"""
+    """Overlapping retry_on and LockError in retry_on with singleton=True raises TypeError at decoration time."""
     with pytest.raises(TypeError):
         LambdaTaskWrapper(
             _make_func(),
-            retry_on=(ValueError,),
-            ignore_errors=(ValueError,),
+            singleton=True,
+            retry_on=(LockError,),
         )
 
 
@@ -107,39 +108,6 @@ def test_property_2_invalid_retry_on_raises_type_error(invalid_element):
     Validates: Requirements 1.3"""
     with pytest.raises(TypeError):
         LambdaTaskWrapper(_make_func(), retry_on=(invalid_element,))  # type: ignore[arg-type]
-
-
-# ---------------------------------------------------------------------------
-# Property 12: Overlapping retry_on and ignore_errors raises TypeError
-# ---------------------------------------------------------------------------
-
-_shared_exc_type_st = st.sampled_from(_EXC_TYPES)
-_other_exc_types_st = st.lists(st.sampled_from(_EXC_TYPES), min_size=0, max_size=2).map(
-    tuple
-)
-
-
-# Feature: task-retry, Property 12: Overlapping retry_on and ignore_errors raises TypeError at decoration time
-# Validates: Requirements 1.5
-@given(
-    shared=_shared_exc_type_st,
-    extra_retry=_other_exc_types_st,
-    extra_ignore=_other_exc_types_st,
-)
-@h_settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
-def test_property_12_overlapping_retry_on_ignore_errors_raises_type_error(
-    shared, extra_retry, extra_ignore
-):
-    """Property 12: overlapping retry_on and ignore_errors raises TypeError at decoration time.
-    Validates: Requirements 1.5"""
-    retry_on = (shared,) + extra_retry
-    ignore_errors = (shared,) + extra_ignore
-    with pytest.raises(TypeError):
-        LambdaTaskWrapper(
-            _make_func(),
-            retry_on=retry_on,
-            ignore_errors=ignore_errors,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -406,8 +374,6 @@ def test_property_singleton_1_storage_round_trip(singleton: bool) -> None:
 # singleton validation: LockError must not be in retry_on
 # ---------------------------------------------------------------------------
 
-from redis.exceptions import LockError
-
 
 def test_singleton_with_lock_error_in_retry_on_raises_type_error() -> None:
     """singleton=True with LockError in retry_on raises TypeError at decoration time."""
@@ -427,3 +393,52 @@ def test_singleton_false_with_lock_error_in_retry_on_is_allowed() -> None:
     wrapper = LambdaTaskWrapper(_make_func(), singleton=False, retry_on=(LockError,))
     assert wrapper.singleton is False
     assert LockError in wrapper.retry_on
+
+
+# ---------------------------------------------------------------------------
+# retry_singleton defaults and forwarding
+# ---------------------------------------------------------------------------
+
+
+def test_retry_singleton_defaults_to_true() -> None:
+    """retry_singleton defaults to True when not supplied."""
+    wrapper = LambdaTaskWrapper(_make_func())
+    assert wrapper.retry_singleton is True
+
+
+def test_retry_singleton_false_is_stored() -> None:
+    """retry_singleton=False is stored and exposed via property."""
+    wrapper = LambdaTaskWrapper(_make_func(), singleton=True, retry_singleton=False)
+    assert wrapper.retry_singleton is False
+
+
+def test_lambda_task_forwards_retry_singleton_false() -> None:
+    """lambda_task(singleton=True, retry_singleton=False) forwards to wrapper."""
+
+    @lambda_task(singleton=True, retry_singleton=False)
+    def _task(*, x: int) -> None:
+        pass
+
+    assert _task.retry_singleton is False
+    assert _task.singleton is True
+
+
+def test_lambda_task_singleton_true_defaults_retry_singleton_true() -> None:
+    """lambda_task(singleton=True) defaults retry_singleton to True."""
+
+    @lambda_task(singleton=True)
+    def _task(*, x: int) -> None:
+        pass
+
+    assert _task.retry_singleton is True
+
+
+# Feature: retry-singleton, Property 1: retry_singleton storage round-trip
+@given(retry_singleton=st.booleans())
+@h_settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+def test_property_retry_singleton_storage_round_trip(retry_singleton: bool) -> None:
+    """Property 1: for any boolean b, LambdaTaskWrapper(func, singleton=True, retry_singleton=b).retry_singleton == b."""
+    wrapper = LambdaTaskWrapper(
+        _make_func(), singleton=True, retry_singleton=retry_singleton
+    )
+    assert wrapper.retry_singleton is retry_singleton

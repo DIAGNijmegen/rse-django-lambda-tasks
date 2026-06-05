@@ -195,10 +195,10 @@ Key characteristics:
     soft_timeout=60,       # seconds — overrides global default for this task
     hard_timeout=90,       # seconds — overrides global default for this task
     queue="default",       # named queue from LAMBDA_TASKS_QUEUES
-    ignore_errors=(),      # exception types treated as non-fatal
     retry_on=(),           # exception types that trigger automatic retry
     retry_delay=0,         # base retry delay in seconds (jitter always added, capped at 900)
     singleton=False,       # prevent concurrent execution via Redis lock
+    retry_singleton=True,  # retry on LockError for singleton tasks (or treat as success if False)
 )
 def my_task(*, arg: str) -> None:
     ...
@@ -209,10 +209,10 @@ def my_task(*, arg: str) -> None:
 | `soft_timeout` | `int \| None` | `None` (uses global default) | Per-task soft timeout in seconds (max 900). |
 | `hard_timeout` | `int \| None` | `None` (uses global default) | Per-task hard timeout in seconds (max 900). |
 | `queue` | `str` | `"default"` | Named queue to route this task to. |
-| `ignore_errors` | `tuple[type[BaseException], ...]` | `()` | Exception types to treat as non-fatal (see [Ignored exceptions](#ignored-exceptions)). |
 | `retry_on` | `tuple[type[BaseException], ...]` | `()` | Exception types that trigger an automatic retry (see [Automatic retries](#automatic-retries)). |
 | `retry_delay` | `int` | `0` | Base delay in seconds when enqueuing a retry. Jitter (1–5s) is always added; result capped at 900. Requires `retry_on` to be non-empty. |
 | `singleton` | `bool` | `False` | Prevent concurrent execution via a Redis lock (see [Singleton tasks](#singleton-tasks)). |
+| `retry_singleton` | `bool` | `True` | When `True`, `LockError` on a singleton task triggers a retry. When `False`, lock contention is treated as a successful no-op (traceback recorded). |
 
 ### Per-call delay override
 
@@ -373,35 +373,6 @@ fields @timestamp, @message
 
 ---
 
-## Ignored exceptions
-
-Pass a tuple of exception types to `ignore_errors` on `@lambda_task`. If the task raises an instance of any listed type (or a subclass), the executor treats it as a non-fatal outcome:
-
-- `TaskRecord.status` is set to `SUCCESS`
-- The exception traceback is saved to `TaskRecord.traceback` for observability
-- Task-side ORM writes inside the `transaction.atomic()` block are still rolled back
-- The `TaskRecord` update is committed outside the atomic block
-
-Exceptions not in `ignore_errors` continue to produce `FAILED` with a rollback. The default (`()`) preserves existing behaviour.
-
-```python
-from lambda_tasks.decorators import lambda_task
-
-class RecordNotFound(Exception):
-    pass
-
-@lambda_task(ignore_errors=(RecordNotFound,))
-def sync_user(*, user_id: int) -> None:
-    user = fetch_user(user_id)   # raises RecordNotFound if already deleted
-    update_profile(user)
-```
-
-If `sync_user` raises `RecordNotFound`, the `TaskRecord` will have `status=SUCCESS` and the traceback recorded in `traceback`. Any ORM writes made before the exception are rolled back.
-
-`ignore_errors` is validated at decoration time — passing a non-exception type raises `TypeError` immediately. It is stored on `LambdaTaskWrapper` and read by the executor at execution time; it is never serialised into the SQS message.
-
----
-
 ## Automatic retries
 
 Pass a tuple of exception types to `retry_on` on `@lambda_task`. If the task raises an instance of any listed type (or a subclass), the executor re-enqueues the task with an incremented retry counter:
@@ -409,8 +380,6 @@ Pass a tuple of exception types to `retry_on` on `@lambda_task`. If the task rai
 - `TaskRecord.status` is set to `RETRYING` and the traceback is recorded
 - The retry is a new invocation — the current record is terminal at `RETRYING`
 - Retries continue until `n_retries` reaches `LAMBDA_TASKS_MAX_RETRIES` (default `2880`), at which point `MaxRetriesExceededError` is raised and the record is saved as `FAILED`
-- `ignore_errors` is checked first — a type in both `ignore_errors` and `retry_on` is treated as ignored (SUCCESS), not retried
-- `retry_on` and `ignore_errors` must not overlap; overlapping raises `TypeError` at decoration time
 
 ```python
 from lambda_tasks.decorators import lambda_task
@@ -437,27 +406,33 @@ from lambda_tasks.decorators import lambda_task
 
 @lambda_task(singleton=True)
 def sync_inventory(*, warehouse_id: int) -> None:
-    # Only one instance runs at a time
+    # Only one instance runs at a time; LockError → RETRYING + re-enqueued
     ...
 ```
 
 - Lock key format: `lambda_tasks.singleton_lock.{task_name}`
 - The lock is acquired with `blocking_timeout=0` (fail immediately if held) and `timeout=hard_timeout` (auto-expire if the worker crashes)
-- If the lock cannot be acquired (`LockError`), the task is retried via the existing retry mechanism — `TaskRecord` is set to `RETRYING`, the traceback is recorded, and the task is re-enqueued with `n_retries + 1`
+- If the lock cannot be acquired (`LockError`) and `retry_singleton=True` (the default), the task is retried — `TaskRecord` is set to `RETRYING`, the traceback is recorded, and the task is re-enqueued with `n_retries + 1`
+- If `retry_singleton=False`, lock contention is treated as a successful no-op — `TaskRecord` is set to `SUCCESS` with the traceback recorded, and no retry is enqueued
 - If `n_retries` reaches `LAMBDA_TASKS_MAX_RETRIES`, `MaxRetriesExceededError` is raised and the record is saved as `FAILED`
 - The cache backend used for locks is controlled by `LAMBDA_TASKS_SINGLETON_CACHE` (default `"default"`)
 
-`LockError` is retried automatically for singleton tasks — do not include it in `retry_on` (doing so raises `TypeError` at decoration time). You may include `LockError` in `ignore_errors` if you want lock contention to be treated as a non-fatal outcome instead of triggering a retry.
+`LockError` is handled automatically for singleton tasks — do not include it in `retry_on` (doing so raises `TypeError` at decoration time).
 
-`singleton` is stored on `LambdaTaskWrapper` and read by the executor at execution time; it is never serialised into the SQS message.
+`singleton` and `retry_singleton` are stored on `LambdaTaskWrapper` and read by the executor at execution time; they are never serialised into the SQS message.
+
+```python
+@lambda_task(singleton=True, retry_singleton=False)
+def sync_inventory(*, warehouse_id: int) -> None:
+    # Lock contention → SUCCESS with traceback (no retry)
+    ...
+```
 
 ---
 
 ## Atomicity
 
 Each task runs inside a `django.db.transaction.atomic` block. If the task raises an unhandled exception, all ORM writes made inside the task are rolled back. The `TaskRecord` failure update is always written outside the atomic block so it survives the rollback.
-
-When an exception matches `ignore_errors`, the same rollback applies to task-side writes — the atomic block still exits via exception. Only the `TaskRecord` update (written outside the block) is committed, recording the `SUCCESS` outcome and traceback.
 
 ---
 
