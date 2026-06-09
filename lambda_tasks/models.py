@@ -18,7 +18,7 @@ from redis.exceptions import LockError
 
 from lambda_tasks.local_executor import submit_task
 from lambda_tasks.logging import task_logger
-from lambda_tasks.settings import LambdaTasksSettings
+from lambda_tasks.settings import MAX_DELAY, LambdaTasksSettings
 from lambda_tasks.timeouts import TimeoutContext
 
 
@@ -188,7 +188,7 @@ class SQSLambdaTaskMessage(BaseModel):
                         )
 
                         delay = min(
-                            wrapper.retry_delay + round(random.uniform(1, 5)), 900
+                            wrapper.retry_delay + round(random.uniform(1, 5)), MAX_DELAY
                         )
 
                         retry_task = SQSLambdaTask(
