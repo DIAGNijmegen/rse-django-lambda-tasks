@@ -19,8 +19,8 @@ from lambda_tasks.environment_loader import (
     resolve_environment,
 )
 
-# A valid 9-segment reference used throughout tests
-_VALID_REF = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:my-env:AWSCURRENT:v1"
+# A valid 8-segment reference used throughout tests
+_VALID_REF = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:my-env:v1"
 _VALID_ARN = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:my-env"
 
 
@@ -83,36 +83,28 @@ class TestParseReference:
     """Unit tests for _parse_reference covering format validation."""
 
     def test_valid_reference_returns_named_tuple(self) -> None:
-        """A valid 9-segment reference is parsed correctly."""
+        """A valid 8-segment reference is parsed correctly."""
         ref = _parse_reference(value=_VALID_REF)
         assert ref.arn == _VALID_ARN
-        assert ref.version_stage == "AWSCURRENT"
         assert ref.version_id == "v1"
 
     def test_too_few_segments_raises_value_error(self) -> None:
-        """Fewer than 9 segments raises ValueError."""
-        with pytest.raises(ValueError, match="9 colon-separated segments"):
+        """Fewer than 8 segments raises ValueError."""
+        with pytest.raises(ValueError, match="8 colon-separated segments"):
             _parse_reference(value="arn:aws:secretsmanager:eu-west-1:123:secret:my-env")
 
     def test_too_many_segments_raises_value_error(self) -> None:
-        """More than 9 segments raises ValueError."""
-        with pytest.raises(ValueError, match="9 colon-separated segments"):
+        """More than 8 segments raises ValueError."""
+        with pytest.raises(ValueError, match="8 colon-separated segments"):
             _parse_reference(
-                value="arn:aws:secretsmanager:eu-west-1:123:secret:my-env:AWSCURRENT:v1:extra"
-            )
-
-    def test_empty_version_stage_raises_value_error(self) -> None:
-        """Empty version-stage raises ValueError."""
-        with pytest.raises(ValueError, match="version-stage"):
-            _parse_reference(
-                value="arn:aws:secretsmanager:eu-west-1:123:secret:my-env::v1"
+                value="arn:aws:secretsmanager:eu-west-1:123:secret:my-env:v1:extra"
             )
 
     def test_empty_version_id_raises_value_error(self) -> None:
         """Empty version-id raises ValueError."""
         with pytest.raises(ValueError, match="version-id"):
             _parse_reference(
-                value="arn:aws:secretsmanager:eu-west-1:123:secret:my-env:AWSCURRENT:"
+                value="arn:aws:secretsmanager:eu-west-1:123:secret:my-env:"
             )
 
 
@@ -344,7 +336,7 @@ class TestResolveHappyPath:
         mock_secretsmanager_client: MagicMock,
         monkeypatch,
     ) -> None:
-        """_fetch_secret calls get_secret_value with ARN, VersionStage, and VersionId."""
+        """_fetch_secret calls get_secret_value with ARN and VersionId only."""
         set_env_arn(value=_VALID_REF)
         mock_secretsmanager_client.get_secret_value.return_value = {
             "SecretString": json.dumps({"KEY": "value"})
@@ -354,7 +346,6 @@ class TestResolveHappyPath:
 
         mock_secretsmanager_client.get_secret_value.assert_called_once_with(
             SecretId=_VALID_ARN,
-            VersionStage="AWSCURRENT",
             VersionId="v1",
         )
 
@@ -369,7 +360,7 @@ class TestResolveHappyPath:
         """An env var with wrong segment count raises ValueError before any API call."""
         set_env_arn(value="arn:aws:secretsmanager:eu-west-1:123:secret:my-env")
 
-        with pytest.raises(ValueError, match="9 colon-separated segments"):
+        with pytest.raises(ValueError, match="8 colon-separated segments"):
             resolve_environment()
 
         mock_secretsmanager_client.get_secret_value.assert_not_called()

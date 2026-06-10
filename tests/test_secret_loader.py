@@ -23,9 +23,9 @@ ARN = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:my-secret"
 ARN2 = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:other-secret"
 
 # A valid full reference: <arn>:<json-key>:<version-stage>:<version-id>
-# ARN = 7 segments, + 3 suffix = 10 total. version-id may be empty string.
-VALID_REF = f"{ARN}:MY_KEY:AWSCURRENT:AWSCURRENT"
-VALID_REF2 = f"{ARN2}:OTHER_KEY:AWSCURRENT:AWSCURRENT"
+# ARN = 7 segments, + 3 suffix = 10 total. version-stage must be empty.
+VALID_REF = f"{ARN}:MY_KEY::v1"
+VALID_REF2 = f"{ARN2}:OTHER_KEY::v1"
 
 
 @pytest.fixture(autouse=True)
@@ -48,15 +48,13 @@ class TestParseReferenceValid:
         ref = _parse_reference(env_var="LAMBDA_TASKS_SECRET_X", value=VALID_REF)
         assert ref.arn == ARN
         assert ref.json_key == "MY_KEY"
-        assert ref.version_stage == "AWSCURRENT"
-        assert ref.version_id == "AWSCURRENT"
+        assert ref.version_id == "v1"
 
     def test_version_id_populated(self):
-        value = f"{ARN}:DJANGO_ADMIN_URL:AWSCURRENT:abc123"
+        value = f"{ARN}:DJANGO_ADMIN_URL::abc123"
         ref = _parse_reference(env_var="LAMBDA_TASKS_SECRET_X", value=value)
         assert ref.arn == ARN
         assert ref.json_key == "DJANGO_ADMIN_URL"
-        assert ref.version_stage == "AWSCURRENT"
         assert ref.version_id == "abc123"
 
 
@@ -72,17 +70,17 @@ class TestParseReferenceInvalid:
 
     def test_empty_json_key_rejected(self):
         # 10 segments but key is empty
-        value = f"{ARN}::AWSCURRENT:abc123"
+        value = f"{ARN}:::abc123"
         with pytest.raises(ValueError, match="missing the json-key"):
             _parse_reference(env_var="LAMBDA_TASKS_SECRET_X", value=value)
 
-    def test_empty_version_stage_rejected(self):
-        value = f"{ARN}:MY_KEY::abc123"
-        with pytest.raises(ValueError, match="missing the version-stage"):
+    def test_non_empty_version_stage_rejected(self):
+        value = f"{ARN}:MY_KEY:AWSCURRENT:abc123"
+        with pytest.raises(ValueError, match="version-stage must be empty"):
             _parse_reference(env_var="LAMBDA_TASKS_SECRET_X", value=value)
 
     def test_empty_version_id_rejected(self):
-        value = f"{ARN}:MY_KEY:AWSCURRENT:"
+        value = f"{ARN}:MY_KEY::"
         with pytest.raises(ValueError, match="missing the version-id"):
             _parse_reference(env_var="LAMBDA_TASKS_SECRET_X", value=value)
 
@@ -140,7 +138,7 @@ class TestMalformedReference:
         mock_boto3.client.assert_not_called()
 
     def test_empty_key_raises_before_any_boto3_call(self, monkeypatch):
-        monkeypatch.setenv("LAMBDA_TASKS_SECRET_MY_VAR", f"{ARN}::AWSCURRENT:abc123")
+        monkeypatch.setenv("LAMBDA_TASKS_SECRET_MY_VAR", f"{ARN}:::abc123")
         with patch("lambda_tasks.secret_loader.boto3") as mock_boto3:
             with pytest.raises(ValueError, match="missing the json-key"):
                 resolve_secrets_into_env()
@@ -239,8 +237,8 @@ class TestResolution:
 
 class TestBatching:
     def test_single_api_call_for_same_arn(self, monkeypatch):
-        ref_a = f"{ARN}:KEY_A:AWSCURRENT:AWSCURRENT"
-        ref_b = f"{ARN}:KEY_B:AWSCURRENT:AWSCURRENT"
+        ref_a = f"{ARN}:KEY_A::v1"
+        ref_b = f"{ARN}:KEY_B::v1"
         monkeypatch.setenv("LAMBDA_TASKS_SECRET_VAR_A", ref_a)
         monkeypatch.setenv("LAMBDA_TASKS_SECRET_VAR_B", ref_b)
         monkeypatch.delenv("VAR_A", raising=False)
@@ -256,8 +254,7 @@ class TestBatching:
 
         client.get_secret_value.assert_called_once_with(
             SecretId=ARN,
-            VersionStage="AWSCURRENT",
-            VersionId="AWSCURRENT",
+            VersionId="v1",
         )
         assert os.environ["VAR_A"] == "val-a"
         assert os.environ["VAR_B"] == "val-b"
@@ -315,9 +312,7 @@ class TestCaching:
         mock_boto3.client.assert_not_called()
 
     def test_no_boto3_client_created_when_all_cached(self, monkeypatch):
-        secret_loader._secret_cache[(ARN, "AWSCURRENT", "AWSCURRENT")] = {
-            "MY_KEY": "pre-cached"
-        }
+        secret_loader._secret_cache[(ARN, "v1")] = {"MY_KEY": "pre-cached"}
         monkeypatch.setenv("LAMBDA_TASKS_SECRET_MY_VAR", VALID_REF)
         monkeypatch.delenv("MY_VAR", raising=False)
 

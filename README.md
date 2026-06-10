@@ -138,7 +138,7 @@ LAMBDA_TASKS_DEFAULT_HARD_TIMEOUT = 270
 
 | Setting | Type | Description |
 |---|---|---|
-| `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` | env var | Secrets Manager reference (`<arn>:<version-stage>:<version-id>`) to load as environment variables at Lambda cold start. |
+| `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` | env var | Secrets Manager reference (`<arn>:<version-id>`) to load as environment variables at Lambda cold start. |
 | `LAMBDA_TASKS_SECRET_*` | env var(s) | Secrets Manager references resolved into env vars at Lambda cold start. The unprefixed name becomes the target env var. |
 
 These are environment variables set on the Lambda function, not Django settings. See [Loading environment variables from Secrets Manager](#loading-environment-variables-from-secrets-manager) and [Resolving individual secrets from AWS Secrets Manager](#resolving-individual-secrets-from-aws-secrets-manager) for full details.
@@ -480,20 +480,20 @@ Ensure the Lambda execution environment has `DJANGO_SETTINGS_MODULE` set and tha
 | Environment Variable | Required | Description |
 |---|---|---|
 | `DJANGO_SETTINGS_MODULE` | Yes | Django settings module path (e.g. `myapp.settings.production`). |
-| `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` | No | Secrets Manager reference (`<arn>:<version-stage>:<version-id>`) to load as environment variables at cold start (runs first). |
+| `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` | No | Secrets Manager reference (`<arn>:<version-id>`) to load as environment variables at cold start (runs first). |
 | `LAMBDA_TASKS_SECRET_*` | No | Secrets Manager references resolved into individual env vars at cold start (runs second, after environment loading). |
 
 ### Loading environment variables from Secrets Manager
 
 The Lambda handler supports loading environment variables from an AWS Secrets Manager secret at cold start. This lets you manage environment configuration centrally in Secrets Manager without baking values into the Lambda deployment package.
 
-Set the `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` environment variable to a full reference including version stage and version ID:
+Set the `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` environment variable to a full reference including version ID:
 
 ```
-LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN=arn:aws:secretsmanager:eu-west-1:123456789012:secret:myapp/prod/environment:AWSCURRENT:v1
+LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN=arn:aws:secretsmanager:eu-west-1:123456789012:secret:myapp/prod/environment:v1
 ```
 
-The format is `<arn>:<version-stage>:<version-id>` (9 colon-separated segments — the ARN is 7 segments, plus version-stage and version-id). Both suffix fields must be non-empty.
+The format is `<arn>:<version-id>` (8 colon-separated segments — the ARN is 7 segments, plus the version-id). The version-id must be non-empty.
 
 The secret value must be a flat JSON object where all keys and values are strings:
 
@@ -508,8 +508,8 @@ The secret value must be a flat JSON object where all keys and values are string
 At cold start (on the first handler invocation), before `resolve_secrets_into_env()` and `django.setup()`, the handler calls `resolve_environment()` which:
 
 1. Checks for the `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` env var — if not set, does nothing
-2. Parses and validates the reference format (9 segments, non-empty version-stage and version-id)
-3. Fetches the secret via `secretsmanager.get_secret_value(SecretId=..., VersionStage=..., VersionId=...)`
+2. Parses and validates the reference format (8 segments, non-empty version-id)
+3. Fetches the secret via `secretsmanager.get_secret_value(SecretId=..., VersionId=...)`
 4. Validates the secret value is a flat JSON object (all values must be strings, no empty keys)
 5. Sets each key-value pair in `os.environ` — existing env vars are overridden
 6. Caches the result via a module-level sentinel — subsequent calls are free no-ops
@@ -520,7 +520,7 @@ Because environment loading runs first, the secret can provide `DJANGO_SETTINGS_
 
 The following raise `ValueError` at cold start, preventing the Lambda container from starting:
 
-- Reference format is invalid (wrong segment count, empty version-stage or version-id)
+- Reference format is invalid (wrong segment count, empty version-id)
 - Secret value is not valid JSON
 - JSON is not a flat object (contains non-string values) — error message lists the offending keys
 - JSON contains an empty string key
@@ -534,14 +534,14 @@ The Lambda handler supports loading individual secret values from AWS Secrets Ma
 Set any env var with the prefix `LAMBDA_TASKS_SECRET_` to a full Secrets Manager dynamic reference. The unprefixed name becomes the target env var:
 
 ```
-LAMBDA_TASKS_SECRET_DATABASE_URL=arn:aws:secretsmanager:eu-west-1:123456789012:secret:myapp/prod:DATABASE_URL:AWSCURRENT:v1
+LAMBDA_TASKS_SECRET_DATABASE_URL=arn:aws:secretsmanager:eu-west-1:123456789012:secret:myapp/prod:DATABASE_URL::v1
 ```
 
 At cold start (on the first handler invocation), after `resolve_environment()` and before `django.setup()`, the handler calls `resolve_secrets_into_env()` which:
 
 1. Scans all env vars for the `LAMBDA_TASKS_SECRET_` prefix
 2. Validates every reference — malformed references raise immediately so the container fails to start rather than misconfiguring Django silently
-3. Groups references by `(ARN, version-stage, version-id)` and makes one `GetSecretValue` call per unique combination
+3. Groups references by `(ARN, version-id)` and makes one `GetSecretValue` call per unique combination
 4. Extracts the named JSON key from the secret and writes it into `os.environ`
 5. Caches fetched secrets in-process — warm invocations pay no extra cost
 
@@ -553,18 +553,18 @@ Every value must follow the full dynamic reference syntax:
 <arn>:<json-key>:<version-stage>:<version-id>
 ```
 
-All four fields are required and must be non-empty. The secret value must be a JSON object; `json-key` names the field to extract.
+The version-stage segment must be empty. The json-key and version-id fields are required and must be non-empty. The secret value must be a JSON object; `json-key` names the field to extract.
 
 ```
-# arn (7 segments) : json-key : version-stage : version-id
-arn:aws:secretsmanager:eu-west-1:123456789012:secret:myapp/prod:DATABASE_URL:AWSCURRENT:v1
+# arn (7 segments) : json-key : version-stage (empty) : version-id
+arn:aws:secretsmanager:eu-west-1:123456789012:secret:myapp/prod:DATABASE_URL::v1
 ```
 
-Multiple env vars can reference different keys from the same secret — only one `GetSecretValue` call is made for that `(ARN, version-stage, version-id)` combination:
+Multiple env vars can reference different keys from the same secret — only one `GetSecretValue` call is made for that `(ARN, version-id)` combination:
 
 ```
-LAMBDA_TASKS_SECRET_DATABASE_URL=arn:...:myapp/prod:DATABASE_URL:AWSCURRENT:v1
-LAMBDA_TASKS_SECRET_SECRET_KEY=arn:...:myapp/prod:SECRET_KEY:AWSCURRENT:v1
+LAMBDA_TASKS_SECRET_DATABASE_URL=arn:...:myapp/prod:DATABASE_URL::v1
+LAMBDA_TASKS_SECRET_SECRET_KEY=arn:...:myapp/prod:SECRET_KEY::v1
 ```
 
 #### Validation errors
@@ -572,7 +572,8 @@ LAMBDA_TASKS_SECRET_SECRET_KEY=arn:...:myapp/prod:SECRET_KEY:AWSCURRENT:v1
 The following all raise `ValueError` at cold start, preventing the Lambda container from starting with a misconfigured environment:
 
 - Wrong number of colon-separated segments (must be exactly 10)
-- Empty `json-key`, `version-stage`, or `version-id`
+- Empty `json-key` or `version-id`
+- Non-empty `version-stage` (version-stage is not supported)
 - Both `LAMBDA_TASKS_SECRET_FOO` and `FOO` are set — use one or the other
 - The named JSON key does not exist in the fetched secret
 - The secret value is not valid JSON

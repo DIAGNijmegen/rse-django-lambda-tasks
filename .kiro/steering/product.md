@@ -138,12 +138,12 @@ class SQSLambdaTaskMessage(BaseModel):
 
 When the environment variable `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` is set, the loader parses the reference, fetches the named Secrets Manager secret, parses its JSON content as a flat key-value mapping, and sets the resulting pairs as environment variables.
 
-Required format: `<arn>:<version-stage>:<version-id>` (9 colon-separated segments — the ARN is 7 segments, plus version-stage and version-id). Both suffix fields must be non-empty.
+Required format: `<arn>:<version-id>` (8 colon-separated segments — the ARN is 7 segments, plus the version-id). The version-id must be non-empty.
 
 Behaviour:
 - If `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` is not set, does nothing (no AWS API calls)
 - Validates the reference format before any AWS call — malformed references raise `ValueError` immediately
-- Fetches the secret via `secretsmanager.get_secret_value(SecretId=..., VersionStage=..., VersionId=...)`
+- Fetches the secret via `secretsmanager.get_secret_value(SecretId=..., VersionId=...)`
 - Validates the secret value is a flat JSON object (all values must be strings, no empty keys)
 - Sets each key-value pair in `os.environ` — existing env vars are overridden (no conflict detection)
 - Idempotent via a module-level `_loaded` sentinel — subsequent calls are free no-ops
@@ -155,12 +155,12 @@ Behaviour:
 
 Any env var prefixed `LAMBDA_TASKS_SECRET_` is treated as a Secrets Manager reference. The unprefixed name is the target env var.
 
-Required format: `<arn>:<json-key>:<version-stage>:<version-id>` (10 colon-separated segments, all fields non-empty).
+Required format: `<arn>:<json-key>:<version-stage>:<version-id>` (10 colon-separated segments). The version-stage segment must be empty. The json-key and version-id must be non-empty.
 
 Behaviour:
 - All references are validated before any AWS call — malformed references raise `ValueError` immediately
 - Setting both `LAMBDA_TASKS_SECRET_FOO` and `FOO` is a configuration error and raises `ValueError`
-- Calls are batched by `(ARN, version-stage, version-id)` — one `GetSecretValue` per unique combination
+- Calls are batched by `(ARN, version-id)` — one `GetSecretValue` per unique combination
 - Fetched secrets are cached in-process; warm invocations pay no extra cost
 
 ## Models

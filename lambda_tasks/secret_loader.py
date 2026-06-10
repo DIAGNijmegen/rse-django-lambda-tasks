@@ -8,11 +8,12 @@ Required value format
 ---------------------
 Every reference must follow the full dynamic reference syntax::
 
-    LAMBDA_TASKS_SECRET_DJANGO_ADMIN_URL=arn:aws:secretsmanager:eu-west-1:123:secret:my-secret:DJANGO_ADMIN_URL:AWSCURRENT:v1
+    LAMBDA_TASKS_SECRET_DJANGO_ADMIN_URL=arn:aws:secretsmanager:eu-west-1:123:secret:my-secret:DJANGO_ADMIN_URL::v1
 
 That is: ``<arn>:<json-key>:<version-stage>:<version-id>``
 
-All four suffix segments must be present and non-empty.
+The version-stage segment must be empty (version-stage is not supported).
+All other suffix segments must be present and non-empty.
 A malformed reference raises ``ValueError`` immediately so the Lambda
 container fails at cold start rather than silently misconfiguring Django.
 
@@ -20,7 +21,7 @@ It is a configuration error to set both ``LAMBDA_TASKS_SECRET_FOO`` and
 ``FOO`` — use one or the other.  Having both raises ``ValueError`` at cold
 start so the misconfiguration is caught immediately.
 
-Calls are batched by unique (ARN, version-stage, version-id) combination —
+Calls are batched by unique (ARN, version-id) combination —
 one ``GetSecretValue`` call per unique combination, regardless of how many
 env vars reference it.  Results are cached in-process so repeated calls to
 ``resolve_secrets_into_env`` are free after the first.
@@ -41,15 +42,14 @@ _PREFIX = "LAMBDA_TASKS_SECRET_"
 # subsequent calls return immediately without re-scanning or re-resolving.
 _loaded: bool = False
 
-# Module-level cache: (arn, version_stage, version_id) → raw secret string.
+# Module-level cache: (arn, version_id) → raw secret string.
 # Populated on first call; reused for the lifetime of the Lambda container.
-_secret_cache: dict[tuple[str, str, str], dict[str, str]] = {}
+_secret_cache: dict[tuple[str, str], dict[str, str]] = {}
 
 
 class _SecretReference(NamedTuple):
     arn: str
     json_key: str
-    version_stage: str
     version_id: str
 
 
@@ -62,7 +62,8 @@ def _parse_reference(*, env_var: str, value: str) -> _SecretReference:
 
     The ARN itself is 7 colon-separated segments, plus 3 suffix segments
     (json-key, version-stage, version-id) = 10 total.
-    All four suffix fields must be non-empty.
+    The version-stage segment must be empty. The json-key and version-id
+    segments must be non-empty.
 
     Raises ``ValueError`` if the format is invalid — this is intentional so
     the Lambda container fails at cold start rather than starting with a
@@ -83,21 +84,28 @@ def _parse_reference(*, env_var: str, value: str) -> _SecretReference:
     arn = ":".join(parts[:7])
     json_key, version_stage, version_id = parts[7], parts[8], parts[9]
 
-    for field, field_value in (
-        ("json-key", json_key),
-        ("version-stage", version_stage),
-        ("version-id", version_id),
-    ):
-        if not field_value:
-            raise ValueError(
-                f"{env_var} is missing the {field} segment in its Secrets Manager "
-                f"reference: {value!r}"
-            )
+    if not json_key:
+        raise ValueError(
+            f"{env_var} is missing the json-key segment in its Secrets Manager "
+            f"reference: {value!r}"
+        )
+
+    if version_stage:
+        raise ValueError(
+            f"{env_var} has a non-empty version-stage segment in its Secrets Manager "
+            f"reference: {value!r}. The version-stage must be empty "
+            f"(format: <arn>:<json-key>::<version-id>)."
+        )
+
+    if not version_id:
+        raise ValueError(
+            f"{env_var} is missing the version-id segment in its Secrets Manager "
+            f"reference: {value!r}"
+        )
 
     return _SecretReference(
         arn=arn,
         json_key=json_key,
-        version_stage=version_stage,
         version_id=version_id,
     )
 
@@ -105,10 +113,10 @@ def _parse_reference(*, env_var: str, value: str) -> _SecretReference:
 def _fetch_secret(*, client: Any, ref: _SecretReference) -> dict[str, str]:
     """Fetch a secret string from Secrets Manager, using the module cache.
 
-    The cache key is ``(arn, version_stage, version_id)`` so that references
+    The cache key is ``(arn, version_id)`` so that references
     to different versions of the same secret are fetched independently.
     """
-    cache_key = (ref.arn, ref.version_stage, ref.version_id)
+    cache_key = (ref.arn, ref.version_id)
 
     if cache_key in _secret_cache:
         return _secret_cache[cache_key]
@@ -117,7 +125,6 @@ def _fetch_secret(*, client: Any, ref: _SecretReference) -> dict[str, str]:
 
     response = client.get_secret_value(
         SecretId=ref.arn,
-        VersionStage=ref.version_stage,
         VersionId=ref.version_id,
     )
 
@@ -171,10 +178,8 @@ def resolve_secrets_into_env() -> None:
             "Use one or the other, not both."
         )
 
-    # Unique (arn, version_stage, version_id) combinations to minimise API calls.
-    unique_cache_keys = {
-        (ref.arn, ref.version_stage, ref.version_id) for ref in references.values()
-    }
+    # Unique (arn, version_id) combinations to minimise API calls.
+    unique_cache_keys = {(ref.arn, ref.version_id) for ref in references.values()}
     uncached = unique_cache_keys - _secret_cache.keys()
     logger.info(
         f"Resolving {len(references)} secret reference(s) from"

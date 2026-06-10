@@ -8,10 +8,10 @@ object (all keys and values must be strings), and sets each key-value pair in
 
 Required value format::
 
-    LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN=arn:aws:secretsmanager:eu-west-1:123:secret:my-env:AWSCURRENT:v1
+    LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN=arn:aws:secretsmanager:eu-west-1:123:secret:my-env:v1
 
-That is: ``<arn>:<version-stage>:<version-id>`` (9 colon-separated segments).
-The ARN is 7 segments, plus version-stage and version-id.
+That is: ``<arn>:<version-id>`` (8 colon-separated segments).
+The ARN is 7 segments, plus the version-id.
 
 This is called by the handler on the first invocation (cold start) — before
 ``resolve_secrets_into_env()`` and before ``django.setup()`` — so that
@@ -36,7 +36,6 @@ _loaded: bool = False
 
 class _EnvironmentSecretReference(NamedTuple):
     arn: str
-    version_stage: str
     version_id: str
 
 
@@ -76,40 +75,34 @@ def _parse_reference(*, value: str) -> _EnvironmentSecretReference:
 
     Expected format::
 
-        <arn>:<version-stage>:<version-id>
+        <arn>:<version-id>
 
-    The ARN itself is 7 colon-separated segments, plus 2 suffix segments
-    (version-stage, version-id) = 9 total.
-    Both suffix fields must be non-empty.
+    The ARN itself is 7 colon-separated segments, plus 1 suffix segment
+    (version-id) = 8 total.
+    The version-id field must be non-empty.
 
     Raises ``ValueError`` if the format is invalid.
     """
     parts = value.split(":")
 
-    if len(parts) != 9:
+    if len(parts) != 8:
         raise ValueError(
             "LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN has an invalid format. "
-            "Expected <arn>:<version-stage>:<version-id> "
-            f"(9 colon-separated segments), got {len(parts)}: {value!r}"
+            "Expected <arn>:<version-id> "
+            f"(8 colon-separated segments), got {len(parts)}: {value!r}"
         )
 
     arn = ":".join(parts[:7])
-    version_stage = parts[7]
-    version_id = parts[8]
+    version_id = parts[7]
 
-    for field, field_value in (
-        ("version-stage", version_stage),
-        ("version-id", version_id),
-    ):
-        if not field_value:
-            raise ValueError(
-                f"LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN is missing the "
-                f"{field} segment: {value!r}"
-            )
+    if not version_id:
+        raise ValueError(
+            f"LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN is missing the "
+            f"version-id segment: {value!r}"
+        )
 
     return _EnvironmentSecretReference(
         arn=arn,
-        version_stage=version_stage,
         version_id=version_id,
     )
 
@@ -119,7 +112,6 @@ def _fetch_secret(*, ref: _EnvironmentSecretReference) -> str:
     client = boto3.client("secretsmanager")
     response = client.get_secret_value(
         SecretId=ref.arn,
-        VersionStage=ref.version_stage,
         VersionId=ref.version_id,
     )
     return response["SecretString"]
