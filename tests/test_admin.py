@@ -9,6 +9,7 @@ from django.utils.timezone import now
 
 import lambda_tasks.admin  # noqa: F401 — triggers @admin.register side-effect
 from lambda_tasks.models import SQSLambdaTask, TaskRecord, TaskStatus
+from lambda_tasks.settings import TaskBackend
 
 
 def test_task_record_registered_in_admin():
@@ -19,6 +20,8 @@ def test_task_record_admin_list_display():
     assert admin.site._registry[TaskRecord].list_display == (
         "pk",
         "task_name",
+        "backend",
+        "queue",
         "status",
         "start_time",
         "end_time",
@@ -52,6 +55,7 @@ def task_record(db: None) -> TaskRecord:
 def _mock_import_string():
     class _FakeWrapper:
         queue = "default"
+        backend = TaskBackend.LAMBDA
 
     with patch("lambda_tasks.admin.import_string", return_value=_FakeWrapper()):
         yield
@@ -167,6 +171,7 @@ class TestReplayAction:
 
         class _FakeWrapper:
             queue = "high-priority"
+            backend = TaskBackend.LAMBDA
 
         with patch.object(SQSLambdaTask, "execute_on_commit", capture_execute):
             with patch(
