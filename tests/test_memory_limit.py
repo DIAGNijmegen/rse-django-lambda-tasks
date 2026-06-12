@@ -7,9 +7,22 @@ killer.
 """
 
 import resource
-from unittest.mock import patch
 
 import lambda_tasks.handler as handler_module
+
+
+class _FakePath:
+    def __init__(self, *, content: str | None) -> None:
+        self._content = content
+
+    def read_text(self) -> str:
+        if self._content is None:
+            raise FileNotFoundError
+        return self._content
+
+
+def fake_path(content: str | None) -> _FakePath:
+    return _FakePath(content=content)
 
 
 class TestMemoryLimitSetDuringColdStart:
@@ -35,14 +48,65 @@ class TestMemoryLimitSetDuringColdStart:
         expected = (512 - 128) * 1024 * 1024
         assert calls == [(resource.RLIMIT_AS, (expected, expected))]
 
-    def test_rlimit_as_not_set_when_env_var_missing(self, monkeypatch):
-        """When AWS_LAMBDA_FUNCTION_MEMORY_SIZE is not set, RLIMIT_AS is unchanged."""
+    def test_rlimit_as_not_set_when_env_var_missing_and_no_cgroup(self, monkeypatch):
+        """When AWS_LAMBDA_FUNCTION_MEMORY_SIZE is not set and cgroup is unavailable, RLIMIT_AS is unchanged."""
         monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
         monkeypatch.delenv("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", raising=False)
         monkeypatch.setattr("lambda_tasks.handler.resolve_environment", lambda: None)
         monkeypatch.setattr(
             "lambda_tasks.handler.resolve_secrets_into_env", lambda: None
         )
+        monkeypatch.setattr(handler_module, "_CGROUP_MEMORY_MAX_PATH", fake_path(None))
+
+        calls: list[tuple] = []
+
+        def fake_setrlimit(which: int, limits: tuple[int, int]) -> None:
+            calls.append((which, limits))
+
+        monkeypatch.setattr(resource, "setrlimit", fake_setrlimit)
+
+        handler_module._cold_start_done = False
+        handler_module.handler(event={"Records": []}, context=None)
+
+        assert calls == []
+
+    def test_rlimit_as_set_from_cgroup(self, monkeypatch):
+        """When AWS_LAMBDA_FUNCTION_MEMORY_SIZE is not set, falls back to cgroup v2."""
+        monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
+        monkeypatch.delenv("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", raising=False)
+        monkeypatch.setattr("lambda_tasks.handler.resolve_environment", lambda: None)
+        monkeypatch.setattr(
+            "lambda_tasks.handler.resolve_secrets_into_env", lambda: None
+        )
+        # 2 GB in bytes
+        monkeypatch.setattr(
+            handler_module,
+            "_CGROUP_MEMORY_MAX_PATH",
+            fake_path(str(2048 * 1024 * 1024)),
+        )
+
+        calls: list[tuple] = []
+
+        def fake_setrlimit(which: int, limits: tuple[int, int]) -> None:
+            calls.append((which, limits))
+
+        monkeypatch.setattr(resource, "setrlimit", fake_setrlimit)
+
+        handler_module._cold_start_done = False
+        handler_module.handler(event={"Records": []}, context=None)
+
+        expected = (2048 - 128) * 1024 * 1024
+        assert calls == [(resource.RLIMIT_AS, (expected, expected))]
+
+    def test_rlimit_as_not_set_when_cgroup_is_max(self, monkeypatch):
+        """When cgroup memory.max is 'max' (unlimited), RLIMIT_AS is unchanged."""
+        monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
+        monkeypatch.delenv("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", raising=False)
+        monkeypatch.setattr("lambda_tasks.handler.resolve_environment", lambda: None)
+        monkeypatch.setattr(
+            "lambda_tasks.handler.resolve_secrets_into_env", lambda: None
+        )
+        monkeypatch.setattr(handler_module, "_CGROUP_MEMORY_MAX_PATH", fake_path("max"))
 
         calls: list[tuple] = []
 

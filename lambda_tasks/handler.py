@@ -17,6 +17,7 @@ import os
 import resource
 import sys
 import uuid
+from pathlib import Path
 
 import django
 from django.apps import apps
@@ -31,27 +32,43 @@ _cold_start_done: bool = False
 
 _MEMORY_RESERVED_MB = 128
 _MEMORY_MINIMUM_LIMIT_MB = 64
+_CGROUP_MEMORY_MAX_PATH = Path("/sys/fs/cgroup/memory.max")
+
+
+def _get_memory_mb() -> int | None:
+    """Get container memory limit from Lambda env var or cgroup v2."""
+    memory_mb_str = os.environ.get("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
+    if memory_mb_str is not None:
+        return int(memory_mb_str)
+
+    try:
+        value = _CGROUP_MEMORY_MAX_PATH.read_text().strip()
+        if value == "max":
+            return None
+        return int(value) // (1024 * 1024)
+    except (FileNotFoundError, ValueError):
+        return None
 
 
 def _set_memory_limit() -> None:
-    """Set RLIMIT_DATA from AWS_LAMBDA_FUNCTION_MEMORY_SIZE if available.
+    """Set RLIMIT_AS from the container memory limit.
 
-    When running in Lambda, this causes Python to raise MemoryError on
-    excessive allocation instead of being killed by the OOM killer.
+    On Lambda, reads AWS_LAMBDA_FUNCTION_MEMORY_SIZE. On Fargate/Batch,
+    reads the cgroup v2 memory limit. This causes Python to raise
+    MemoryError on excessive allocation instead of being killed by the
+    OOM killer.
 
     128 MB is reserved for the Python runtime, shared libraries, and OS
-    overhead. The limit is floored at 64 MB so that even small Lambdas
+    overhead. The limit is floored at 64 MB so that even small containers
     get some protection.
     """
-    memory_mb = os.environ.get("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
+    memory_mb = _get_memory_mb()
 
     if memory_mb is None:
         return
 
     limit_bytes = (
-        max(int(memory_mb) - _MEMORY_RESERVED_MB, _MEMORY_MINIMUM_LIMIT_MB)
-        * 1024
-        * 1024
+        max(memory_mb - _MEMORY_RESERVED_MB, _MEMORY_MINIMUM_LIMIT_MB) * 1024 * 1024
     )
     resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
     logger.info(
