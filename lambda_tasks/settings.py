@@ -69,8 +69,10 @@ class LambdaTasksSettings:
         config = self.QUEUES[queue]
         if isinstance(config, BatchQueueConfig):
             return MAX_BATCH_TIMEOUT
-        else:
+        elif isinstance(config, SQSQueueConfig):
             return MAX_TIMEOUT
+        else:
+            raise NotImplementedError
 
     @property
     def EAGER(self) -> bool:

@@ -18,7 +18,12 @@ from redis.exceptions import LockError
 
 from lambda_tasks.local_executor import submit_task
 from lambda_tasks.logging import task_logger
-from lambda_tasks.settings import MAX_DELAY, BatchQueueConfig, LambdaTasksSettings
+from lambda_tasks.settings import (
+    MAX_DELAY,
+    BatchQueueConfig,
+    LambdaTasksSettings,
+    SQSQueueConfig,
+)
 from lambda_tasks.timeouts import TimeoutContext
 
 
@@ -275,10 +280,12 @@ class SQSLambdaTask(BaseModel):
                     batch_queue=self.queue,
                     _delay=self.delay,
                 )
-            else:
+            elif isinstance(queue_config, SQSQueueConfig):
                 client = boto3.client("sqs")
                 client.send_message(
                     QueueUrl=queue_config.queue_url,
                     MessageBody=self.message.model_dump_json(),
                     DelaySeconds=self.delay,
                 )
+            else:
+                raise NotImplementedError
