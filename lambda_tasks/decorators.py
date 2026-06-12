@@ -9,12 +9,12 @@ import functools
 import inspect
 import types
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, ClassVar, overload
+from typing import Any, ClassVar, overload
 
 import pydantic
 from redis.exceptions import LockError
 
-from lambda_tasks.models import SQSLambdaTaskMessage
+from lambda_tasks.models import SQSLambdaTask, SQSLambdaTaskMessage
 from lambda_tasks.settings import (
     MAX_BATCH_TIMEOUT,
     MAX_DELAY,
@@ -22,9 +22,6 @@ from lambda_tasks.settings import (
     LambdaTasksSettings,
     TaskBackend,
 )
-
-if TYPE_CHECKING:
-    from lambda_tasks.models import SQSLambdaTask
 
 
 def _build_kwargs_model(func: types.FunctionType) -> type[pydantic.BaseModel]:
@@ -149,10 +146,8 @@ class BaseTaskWrapper:
         self._kwargs_model.model_validate(kwargs)
         return self._func(**kwargs)
 
-    def _build_task(self, *, kwargs: dict[str, Any]) -> "SQSLambdaTask":
+    def _build_task(self, *, kwargs: dict[str, Any]) -> SQSLambdaTask:
         """Pop overrides, validate kwargs, and build an SQSLambdaTask."""
-        from lambda_tasks.models import SQSLambdaTask
-
         n_retries = kwargs.pop("_n_retries", 0)
         delay = kwargs.pop("_delay", 0)
 
@@ -179,7 +174,7 @@ class BaseTaskWrapper:
     def execute_on_commit(self, **kwargs: Any) -> None:
         """Enqueue the task to run after the current transaction commits."""
         task = self._build_task(kwargs=kwargs)
-        task.execute_on_commit()  # type: ignore[attr-defined]
+        task.execute_on_commit()
 
     def _validate_func(self, *, func: types.FunctionType) -> None:
         """Raise TypeError if *func* has positional, **kwargs, underscore-prefixed, or unannotated parameters."""
