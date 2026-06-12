@@ -87,6 +87,5 @@ class TaskRecordAdmin(admin.ModelAdmin):
                 ),
                 delay=0,
                 queue=wrapper.queue,
-                backend=wrapper.backend,
             )
             task.execute_on_commit()

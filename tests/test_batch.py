@@ -8,7 +8,6 @@ from django.core.exceptions import ImproperlyConfigured
 
 from lambda_tasks.decorators import batch_task
 from lambda_tasks.models import SQSLambdaTask, SQSLambdaTaskMessage, TaskRecord
-from lambda_tasks.settings import TaskBackend
 from lambda_tasks.tasks import _sanitize_job_name, submit_batch_job
 
 BATCH_QUEUES = {
@@ -121,12 +120,9 @@ class TestSQSLambdaTaskBatchBackend:
         settings.LAMBDA_TASKS_QUEUES = QUEUES
         settings.LAMBDA_TASKS_BATCH_QUEUES = BATCH_QUEUES
 
-        message = SQSLambdaTaskMessage(
-            task_name="myapp.tasks.heavy_task", kwargs={"n": 1}
-        )
-        task = SQSLambdaTask(
-            message=message, delay=0, queue="default", backend=TaskBackend.BATCH
-        )
+        task_name = f"{_batch_task_succeeds.__module__}.{_batch_task_succeeds.__wrapped__.__qualname__}"
+        message = SQSLambdaTaskMessage(task_name=task_name, kwargs={"value": 1})
+        task = SQSLambdaTask(message=message, delay=0, queue="default")
 
         with patch("lambda_tasks.tasks.submit_batch_job.execute_on_commit") as mock_eoc:
             task._execute()
@@ -143,9 +139,7 @@ class TestSQSLambdaTaskBatchBackend:
 
         task_name = f"{_batch_task_succeeds.__module__}.{_batch_task_succeeds.__wrapped__.__qualname__}"
         message = SQSLambdaTaskMessage(task_name=task_name, kwargs={"value": 42})
-        task = SQSLambdaTask(
-            message=message, delay=0, queue="default", backend=TaskBackend.BATCH
-        )
+        task = SQSLambdaTask(message=message, delay=0, queue="default")
 
         task._execute()
 
@@ -194,5 +188,5 @@ class TestBatchTaskRetry:
             message.execute_immediately(message_id=message_id)
 
         assert len(retry_tasks) == 1
-        assert retry_tasks[0].backend == TaskBackend.BATCH
         assert retry_tasks[0].message.n_retries == 1
+        assert retry_tasks[0].message.task_name == task_name

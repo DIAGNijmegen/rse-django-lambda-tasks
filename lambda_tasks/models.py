@@ -199,7 +199,6 @@ class SQSLambdaTaskMessage(BaseModel):
                             ),
                             delay=delay,
                             queue=wrapper.queue,
-                            backend=wrapper.backend,
                         )
                         retry_task.execute_on_commit()
 
@@ -242,7 +241,6 @@ class SQSLambdaTask(BaseModel):
     message: SQSLambdaTaskMessage
     delay: int
     queue: str
-    backend: TaskBackend = TaskBackend.LAMBDA
 
     def execute_on_commit(self) -> None:
         """Enqueue this task after the current transaction commits."""
@@ -261,7 +259,7 @@ class SQSLambdaTask(BaseModel):
             self.message.execute_immediately(message_id=str(uuid.uuid4()))
         elif conf.LOCAL_WORKERS > 0:
             submit_task(message_json=self.message.model_dump_json())
-        elif self.backend == TaskBackend.BATCH:
+        elif import_string(self.message.task_name).backend == TaskBackend.BATCH:
             from lambda_tasks.tasks import submit_batch_job
 
             submit_batch_job.execute_on_commit(

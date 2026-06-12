@@ -169,7 +169,6 @@ class BaseTaskWrapper:
             message=message,
             delay=delay,
             queue=self._queue,
-            backend=self._backend,
         )
 
     def serialize(self, **kwargs: Any) -> dict:

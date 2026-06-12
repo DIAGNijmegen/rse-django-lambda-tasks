@@ -449,7 +449,7 @@ class TestDispatchRouting:
         settings.LAMBDA_TASKS_EAGER = False
 
         message = SQSLambdaTaskMessage(
-            task_name="myapp.tasks.foo",
+            task_name="lambda_tasks.tasks.cleanup_task_records",
             kwargs={"user_id": 1},
             n_retries=0,
         )
@@ -473,7 +473,7 @@ class TestDispatchRouting:
         settings.LAMBDA_TASKS_EAGER = False
 
         message = SQSLambdaTaskMessage(
-            task_name="myapp.tasks.foo",
+            task_name="lambda_tasks.tasks.cleanup_task_records",
             kwargs={"user_id": 1},
             n_retries=0,
         )
@@ -501,7 +501,7 @@ class TestDispatchRouting:
         }
 
         message = SQSLambdaTaskMessage(
-            task_name="myapp.tasks.foo",
+            task_name="lambda_tasks.tasks.cleanup_task_records",
             kwargs={"user_id": 1},
             n_retries=0,
         )
@@ -531,7 +531,7 @@ class TestDispatchRouting:
             delattr(settings, "LAMBDA_TASKS_LOCAL_WORKERS")
 
         message = SQSLambdaTaskMessage(
-            task_name="myapp.tasks.foo",
+            task_name="lambda_tasks.tasks.cleanup_task_records",
             kwargs={"user_id": 1},
             n_retries=0,
         )
@@ -603,7 +603,7 @@ class TestTransactionCommitIntegration:
         settings.LAMBDA_TASKS_EAGER = False
 
         message = SQSLambdaTaskMessage(
-            task_name="myapp.tasks.foo",
+            task_name="lambda_tasks.tasks.cleanup_task_records",
             kwargs={"user_id": 1},
             n_retries=0,
         )
@@ -633,7 +633,7 @@ class TestTransactionCommitIntegration:
         settings.LAMBDA_TASKS_EAGER = False
 
         message = SQSLambdaTaskMessage(
-            task_name="myapp.tasks.foo",
+            task_name="lambda_tasks.tasks.cleanup_task_records",
             kwargs={"user_id": 1},
             n_retries=0,
         )
