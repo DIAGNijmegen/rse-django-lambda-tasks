@@ -182,6 +182,40 @@ class BaseTaskWrapper:
         task = self._build_task(kwargs=kwargs)
         task.execute_on_commit()  # type: ignore[attr-defined]
 
+    def _validate_func(self, *, func: types.FunctionType) -> None:
+        """Raise TypeError if *func* has positional, **kwargs, underscore-prefixed, or unannotated parameters."""
+        sig = inspect.signature(func)
+        hints = func.__annotations__.copy()
+        hints.pop("return", None)
+        name: str = func.__name__
+        task_type = f"{self._backend.value}_task"
+
+        for param in sig.parameters.values():
+            if param.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                raise TypeError(
+                    f"{task_type} functions must use keyword-only arguments. "
+                    f"'{name}' has positional parameter '{param.name}'."
+                )
+            if param.kind is inspect.Parameter.VAR_KEYWORD:
+                raise TypeError(
+                    f"{task_type} functions must not use **kwargs. "
+                    f"'{name}' has a **{param.name} parameter — declare all parameters explicitly."
+                )
+            if param.name.startswith("_"):
+                raise TypeError(
+                    f"{task_type} function parameters must not start with '_' "
+                    f"(reserved for on_commit overrides). "
+                    f"'{name}' has reserved parameter '{param.name}'."
+                )
+            if param.kind is inspect.Parameter.KEYWORD_ONLY and param.name not in hints:
+                raise TypeError(
+                    f"{task_type} function parameters must be type-annotated. "
+                    f"'{name}' has unannotated parameter '{param.name}'."
+                )
+
     @property
     def retry_delay(self) -> int:
         """Delay in seconds used when enqueuing a retry."""
@@ -244,40 +278,6 @@ class BaseTaskWrapper:
                 raise TypeError(
                     f"retry_on must contain only exception types (subclasses of "
                     f"BaseException); got {item!r}."
-                )
-
-    def _validate_func(self, *, func: types.FunctionType) -> None:
-        """Raise TypeError if *func* has positional, **kwargs, underscore-prefixed, or unannotated parameters."""
-        sig = inspect.signature(func)
-        hints = func.__annotations__.copy()
-        hints.pop("return", None)
-        name: str = func.__name__
-        task_type = f"{self._backend.value}_task"
-
-        for param in sig.parameters.values():
-            if param.kind in (
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            ):
-                raise TypeError(
-                    f"{task_type} functions must use keyword-only arguments. "
-                    f"'{name}' has positional parameter '{param.name}'."
-                )
-            if param.kind is inspect.Parameter.VAR_KEYWORD:
-                raise TypeError(
-                    f"{task_type} functions must not use **kwargs. "
-                    f"'{name}' has a **{param.name} parameter — declare all parameters explicitly."
-                )
-            if param.name.startswith("_"):
-                raise TypeError(
-                    f"{task_type} function parameters must not start with '_' "
-                    f"(reserved for on_commit overrides). "
-                    f"'{name}' has reserved parameter '{param.name}'."
-                )
-            if param.kind is inspect.Parameter.KEYWORD_ONLY and param.name not in hints:
-                raise TypeError(
-                    f"{task_type} function parameters must be type-annotated. "
-                    f"'{name}' has unannotated parameter '{param.name}'."
                 )
 
     def _validate_timeouts(
