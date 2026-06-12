@@ -159,3 +159,81 @@ def test_singleton_cache_reads_configured_value(settings):
     settings.LAMBDA_TASKS_SINGLETON_CACHE = "redis_locks"
     conf = LambdaTasksSettings()
     assert conf.SINGLETON_CACHE == "redis_locks"
+
+
+# ---------------------------------------------------------------------------
+# BATCH_QUEUES
+# ---------------------------------------------------------------------------
+
+BATCH_QUEUES_VALID = {
+    "default": {
+        "job_queue": "arn:aws:batch:eu-west-1:123456789:job-queue/default",
+        "job_definition": "arn:aws:batch:eu-west-1:123456789:job-definition/default:1",
+    },
+}
+
+
+def test_batch_queues_not_set_returns_empty_dict(settings):
+    from lambda_tasks.settings import LambdaTasksSettings
+
+    conf = LambdaTasksSettings()
+    assert conf.BATCH_QUEUES == {}
+
+
+def test_batch_queues_valid_config(settings):
+    from lambda_tasks.settings import LambdaTasksSettings
+
+    settings.LAMBDA_TASKS_BATCH_QUEUES = BATCH_QUEUES_VALID
+    conf = LambdaTasksSettings()
+    assert conf.BATCH_QUEUES == BATCH_QUEUES_VALID
+
+
+def test_batch_queues_missing_default_key_raises(settings):
+    from lambda_tasks.settings import LambdaTasksSettings
+
+    settings.LAMBDA_TASKS_BATCH_QUEUES = {
+        "heavy": {
+            "job_queue": "arn:aws:batch:eu-west-1:123456789:job-queue/heavy",
+            "job_definition": "arn:aws:batch:eu-west-1:123456789:job-definition/heavy:1",
+        },
+    }
+    conf = LambdaTasksSettings()
+    with pytest.raises(ImproperlyConfigured):
+        _ = conf.BATCH_QUEUES
+
+
+def test_batch_queues_missing_job_queue_raises(settings):
+    from lambda_tasks.settings import LambdaTasksSettings
+
+    settings.LAMBDA_TASKS_BATCH_QUEUES = {
+        "default": {
+            "job_definition": "arn:aws:batch:eu-west-1:123456789:job-definition/default:1",
+        },
+    }
+    conf = LambdaTasksSettings()
+    with pytest.raises(ImproperlyConfigured):
+        _ = conf.BATCH_QUEUES
+
+
+def test_batch_queues_missing_job_definition_raises(settings):
+    from lambda_tasks.settings import LambdaTasksSettings
+
+    settings.LAMBDA_TASKS_BATCH_QUEUES = {
+        "default": {
+            "job_queue": "arn:aws:batch:eu-west-1:123456789:job-queue/default",
+        },
+    }
+    conf = LambdaTasksSettings()
+    with pytest.raises(ImproperlyConfigured):
+        _ = conf.BATCH_QUEUES
+
+
+def test_batch_queues_non_dict_value_raises(settings):
+    from lambda_tasks.settings import LambdaTasksSettings
+
+    settings.LAMBDA_TASKS_BATCH_QUEUES = {
+        "default": "not-a-dict",
+    }
+    conf = LambdaTasksSettings()
+    with pytest.raises(ImproperlyConfigured):
+        _ = conf.BATCH_QUEUES

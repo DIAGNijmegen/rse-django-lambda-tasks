@@ -1,3 +1,4 @@
+import enum
 from typing import Final
 
 from django.conf import settings as django_settings
@@ -5,6 +6,12 @@ from django.core.exceptions import ImproperlyConfigured
 
 MAX_DELAY: Final = 900
 MAX_TIMEOUT: Final = 900
+MAX_BATCH_TIMEOUT: Final = 3600
+
+
+class TaskBackend(str, enum.Enum):
+    LAMBDA = "lambda"
+    BATCH = "batch"
 
 
 class LambdaTasksSettings:
@@ -43,6 +50,31 @@ class LambdaTasksSettings:
     @property
     def SINGLETON_CACHE(self) -> str:
         return str(getattr(django_settings, "LAMBDA_TASKS_SINGLETON_CACHE", "default"))
+
+    @property
+    def BATCH_QUEUES(self) -> dict[str, dict[str, str]]:
+        queues = getattr(django_settings, "LAMBDA_TASKS_BATCH_QUEUES", None)
+
+        if queues is None:
+            return {}
+
+        if "default" not in queues:
+            raise ImproperlyConfigured(
+                "LAMBDA_TASKS_BATCH_QUEUES must contain a 'default' key."
+            )
+
+        for name, config in queues.items():
+            if not isinstance(config, dict):
+                raise ImproperlyConfigured(
+                    f"LAMBDA_TASKS_BATCH_QUEUES['{name}'] must be a dict."
+                )
+            for key in ("job_queue", "job_definition"):
+                if key not in config or not isinstance(config[key], str):
+                    raise ImproperlyConfigured(
+                        f"LAMBDA_TASKS_BATCH_QUEUES['{name}'] must contain a '{key}' string."
+                    )
+
+        return queues
 
     @property
     def LOCAL_WORKERS(self) -> int:

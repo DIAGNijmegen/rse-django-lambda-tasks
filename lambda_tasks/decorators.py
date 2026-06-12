@@ -1,24 +1,30 @@
 """
-Decorator and wrapper for lambda tasks.
+Decorators and wrappers for lambda and batch tasks.
 
-Provides LambdaTaskWrapper, which wraps a callable to expose:
-- direct __call__(**kwargs) — synchronous invocation
-- on_commit(**kwargs) — enqueue via django.db.transaction.on_commit
-
-Also provides the lambda_task decorator factory.
+Provides BaseTaskWrapper, LambdaTaskWrapper, BatchTaskWrapper, and their
+decorator factories (lambda_task, batch_task).
 """
 
 import functools
 import inspect
 import types
 from collections.abc import Callable
-from typing import Any, overload
+from typing import TYPE_CHECKING, Any, ClassVar, overload
 
 import pydantic
 from redis.exceptions import LockError
 
-from lambda_tasks.models import SQSLambdaTask, SQSLambdaTaskMessage
-from lambda_tasks.settings import MAX_DELAY, MAX_TIMEOUT, LambdaTasksSettings
+from lambda_tasks.models import SQSLambdaTaskMessage
+from lambda_tasks.settings import (
+    MAX_BATCH_TIMEOUT,
+    MAX_DELAY,
+    MAX_TIMEOUT,
+    LambdaTasksSettings,
+    TaskBackend,
+)
+
+if TYPE_CHECKING:
+    from lambda_tasks.models import SQSLambdaTask
 
 
 def _build_kwargs_model(func: types.FunctionType) -> type[pydantic.BaseModel]:
@@ -49,13 +55,12 @@ def _build_kwargs_model(func: types.FunctionType) -> type[pydantic.BaseModel]:
     )
 
 
-class LambdaTaskWrapper:
-    """Wraps a function to be executed as a background task.
+class BaseTaskWrapper:
+    """Base class for task wrappers. Subclasses must set _max_timeout and _backend."""
 
-    Preserves __name__, __doc__, and __wrapped__ via functools.wraps.
-    """
+    _max_timeout: ClassVar[int]
+    _backend: ClassVar[TaskBackend]
 
-    # Declared explicitly so type checkers can see them (set by functools.update_wrapper)
     __wrapped__: Callable[..., Any]
     __name__: str
     __doc__: str | None
@@ -94,10 +99,9 @@ class LambdaTaskWrapper:
     def resolved_timeouts(self) -> tuple[int, int]:
         """Return (soft_timeout, hard_timeout) resolved against settings defaults.
 
-        Merges decorator-supplied values with settings defaults, then validates
-        the final pair.  Each resolved value must be greater than zero and at
-        most ``MAX_TIMEOUT`` (900), and ``soft_timeout`` must be strictly less
-        than ``hard_timeout``.  Result is cached after first access.
+        Each resolved value must be greater than zero and at most
+        ``_max_timeout``, and ``soft_timeout`` must be strictly less than
+        ``hard_timeout``. Result is cached after first access.
         """
         try:
             return self._resolved_timeouts_cache
@@ -116,7 +120,8 @@ class LambdaTaskWrapper:
             else conf.DEFAULT_HARD_TIMEOUT
         )
 
-        # Validate settings-sourced values (decorator values are already checked at decoration time)
+        max_timeout = self._max_timeout
+
         for name, value, source in (
             ("soft_timeout", soft, self._soft_timeout),
             ("hard_timeout", hard, self._hard_timeout),
@@ -125,12 +130,11 @@ class LambdaTaskWrapper:
                 raise ValueError(
                     f"{name} ({value}) from settings must be greater than zero."
                 )
-            if source is None and value > MAX_TIMEOUT:
+            if source is None and value > max_timeout:
                 raise ValueError(
-                    f"{name} ({value}) from settings exceeds the maximum allowed value of {MAX_TIMEOUT} seconds."
+                    f"{name} ({value}) from settings exceeds the maximum allowed value of {max_timeout} seconds."
                 )
 
-        # Cross-validate the resolved pair (decorator values may mix with settings defaults)
         if soft >= hard:
             raise ValueError(
                 f"Resolved soft_timeout ({soft}) must be strictly less than "
@@ -145,21 +149,14 @@ class LambdaTaskWrapper:
         self._kwargs_model.model_validate(kwargs)
         return self._func(**kwargs)
 
-    def _build_task(self, *, kwargs: dict[str, Any]) -> SQSLambdaTask:
-        """Pop overrides, validate kwargs, and build a SQSLambdaTask.
+    def _build_task(self, *, kwargs: dict[str, Any]) -> "SQSLambdaTask":
+        """Pop overrides, validate kwargs, and build an SQSLambdaTask."""
+        from lambda_tasks.models import SQSLambdaTask
 
-        Mutates *kwargs* in-place (pops ``_n_retries``, ``_delay``).
-        Returns ``SQSLambdaTask``.
-
-        Raises:
-            pydantic.ValidationError: if the remaining kwargs fail type validation.
-            ValueError: if ``_delay`` is outside the allowed range [0, 900].
-        """
         n_retries = kwargs.pop("_n_retries", 0)
         delay = kwargs.pop("_delay", 0)
 
         self._validate_delay(delay=delay)
-
         self._kwargs_model.model_validate(kwargs)
 
         message = SQSLambdaTaskMessage(
@@ -172,67 +169,33 @@ class LambdaTaskWrapper:
             message=message,
             delay=delay,
             queue=self._queue,
+            backend=self._backend,
         )
 
     def serialize(self, **kwargs: Any) -> dict:
-        """Serialize this task invocation to a JSON-compatible dict for deferred enqueuing.
-
-        Returns a dict matching SQSLambdaTaskMessage schema
-
-        Raises:
-            pydantic.ValidationError: if kwargs fail the task's declared type annotations.
-        """
+        """Serialize this task invocation to a JSON-compatible dict."""
         task = self._build_task(kwargs=kwargs)
         return task.model_dump(mode="json")
 
     def execute_on_commit(self, **kwargs: Any) -> None:
         """Enqueue the task to run after the current transaction commits."""
         task = self._build_task(kwargs=kwargs)
-        task.execute_on_commit()
-
-    @staticmethod
-    def _validate_func(*, func: types.FunctionType) -> None:
-        """Raise TypeError if *func* has positional, **kwargs, underscore-prefixed, or unannotated parameters."""
-        sig = inspect.signature(func)
-        hints = func.__annotations__.copy()
-        hints.pop("return", None)
-        name: str = func.__name__
-
-        for param in sig.parameters.values():
-            if param.kind in (
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            ):
-                raise TypeError(
-                    f"lambda_task functions must use keyword-only arguments. "
-                    f"'{name}' has positional parameter '{param.name}'."
-                )
-            if param.kind is inspect.Parameter.VAR_KEYWORD:
-                raise TypeError(
-                    f"lambda_task functions must not use **kwargs. "
-                    f"'{name}' has a **{param.name} parameter — declare all parameters explicitly."
-                )
-            if param.name.startswith("_"):
-                raise TypeError(
-                    f"lambda_task function parameters must not start with '_' "
-                    f"(reserved for on_commit overrides). "
-                    f"'{name}' has reserved parameter '{param.name}'."
-                )
-            if param.kind is inspect.Parameter.KEYWORD_ONLY and param.name not in hints:
-                raise TypeError(
-                    f"lambda_task function parameters must be type-annotated. "
-                    f"'{name}' has unannotated parameter '{param.name}'."
-                )
+        task.execute_on_commit()  # type: ignore[attr-defined]
 
     @property
     def retry_delay(self) -> int:
-        """Delay in seconds used when enqueuing a retry. 0 means use jitter."""
+        """Delay in seconds used when enqueuing a retry."""
         return self._retry_delay
 
     @property
     def queue(self) -> str:
-        """The SQS queue name this task is routed to."""
+        """The queue name this task is routed to."""
         return self._queue
+
+    @property
+    def backend(self) -> TaskBackend:
+        """The backend used for task execution."""
+        return self._backend
 
     @property
     def retry_on(self) -> tuple[type[BaseException], ...]:
@@ -283,25 +246,55 @@ class LambdaTaskWrapper:
                     f"BaseException); got {item!r}."
                 )
 
-    @staticmethod
-    def _validate_timeouts(
-        *, soft_timeout: int | None, hard_timeout: int | None
-    ) -> None:
-        """Raise ValueError if any timeout is not in (0, 900] or soft_timeout >= hard_timeout.
+    def _validate_func(self, *, func: types.FunctionType) -> None:
+        """Raise TypeError if *func* has positional, **kwargs, underscore-prefixed, or unannotated parameters."""
+        sig = inspect.signature(func)
+        hints = func.__annotations__.copy()
+        hints.pop("return", None)
+        name: str = func.__name__
+        task_type = f"{self._backend.value}_task"
 
-        Each timeout, when supplied, must be greater than zero and at most
-        ``MAX_TIMEOUT`` (900).  When both are supplied, ``soft_timeout`` must
-        be strictly less than ``hard_timeout``.
-        """
+        for param in sig.parameters.values():
+            if param.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                raise TypeError(
+                    f"{task_type} functions must use keyword-only arguments. "
+                    f"'{name}' has positional parameter '{param.name}'."
+                )
+            if param.kind is inspect.Parameter.VAR_KEYWORD:
+                raise TypeError(
+                    f"{task_type} functions must not use **kwargs. "
+                    f"'{name}' has a **{param.name} parameter — declare all parameters explicitly."
+                )
+            if param.name.startswith("_"):
+                raise TypeError(
+                    f"{task_type} function parameters must not start with '_' "
+                    f"(reserved for on_commit overrides). "
+                    f"'{name}' has reserved parameter '{param.name}'."
+                )
+            if param.kind is inspect.Parameter.KEYWORD_ONLY and param.name not in hints:
+                raise TypeError(
+                    f"{task_type} function parameters must be type-annotated. "
+                    f"'{name}' has unannotated parameter '{param.name}'."
+                )
+
+    def _validate_timeouts(
+        self, *, soft_timeout: int | None, hard_timeout: int | None
+    ) -> None:
+        """Raise ValueError if any timeout is invalid for this task type."""
+        max_timeout = self._max_timeout
+
         for name, value in (
             ("soft_timeout", soft_timeout),
             ("hard_timeout", hard_timeout),
         ):
             if value is not None and value <= 0:
                 raise ValueError(f"{name} ({value}) must be greater than zero.")
-            if value is not None and value > MAX_TIMEOUT:
+            if value is not None and value > max_timeout:
                 raise ValueError(
-                    f"{name} ({value}) exceeds the maximum allowed value of {MAX_TIMEOUT} seconds."
+                    f"{name} ({value}) exceeds the maximum allowed value of {max_timeout} seconds."
                 )
 
         if soft_timeout is not None and hard_timeout is not None:
@@ -326,6 +319,20 @@ class LambdaTaskWrapper:
                         f"when singleton=True — LockError is retried automatically. "
                         f"Got {exc_type.__name__!r}."
                     )
+
+
+class LambdaTaskWrapper(BaseTaskWrapper):
+    """Wraps a function to be executed as a background task on AWS Lambda via SQS."""
+
+    _max_timeout: ClassVar[int] = MAX_TIMEOUT
+    _backend: ClassVar[TaskBackend] = TaskBackend.LAMBDA
+
+
+class BatchTaskWrapper(BaseTaskWrapper):
+    """Wraps a function to be executed as a background task on AWS Batch."""
+
+    _max_timeout: ClassVar[int] = MAX_BATCH_TIMEOUT
+    _backend: ClassVar[TaskBackend] = TaskBackend.BATCH
 
 
 @overload
@@ -379,7 +386,7 @@ def lambda_task(
     """
 
     def _decorate(f: types.FunctionType) -> LambdaTaskWrapper:
-        wrapper = LambdaTaskWrapper(
+        return LambdaTaskWrapper(
             f,
             retry_delay=retry_delay,
             soft_timeout=soft_timeout,
@@ -389,11 +396,76 @@ def lambda_task(
             singleton=singleton,
             retry_singleton=retry_singleton,
         )
-        return wrapper
 
     if func is not None:
-        # Called as @lambda_task (no parentheses)
         return _decorate(func)
 
-    # Called as @lambda_task(...) — return the decorator
+    return _decorate
+
+
+@overload
+def batch_task(
+    func: types.FunctionType,
+    *,
+    retry_delay: int = ...,
+    soft_timeout: int | None = ...,
+    hard_timeout: int | None = ...,
+    queue: str = ...,
+    retry_on: tuple[type[BaseException], ...] = ...,
+    singleton: bool = ...,
+    retry_singleton: bool = ...,
+) -> BatchTaskWrapper: ...
+
+
+@overload
+def batch_task(
+    func: None = None,
+    *,
+    retry_delay: int = ...,
+    soft_timeout: int | None = ...,
+    hard_timeout: int | None = ...,
+    queue: str = ...,
+    retry_on: tuple[type[BaseException], ...] = ...,
+    singleton: bool = ...,
+    retry_singleton: bool = ...,
+) -> Callable[[types.FunctionType], BatchTaskWrapper]: ...
+
+
+def batch_task(
+    func: types.FunctionType | None = None,
+    *,
+    retry_delay: int = 0,
+    soft_timeout: int | None = None,
+    hard_timeout: int | None = None,
+    queue: str = "default",
+    retry_on: tuple[type[BaseException], ...] = (),
+    singleton: bool = False,
+    retry_singleton: bool = True,
+) -> BatchTaskWrapper | Callable[[types.FunctionType], BatchTaskWrapper]:
+    """Decorator factory that registers a function as a Batch background task.
+
+    Can be used with or without parentheses::
+
+        @batch_task
+        def my_task(*, x: int): ...
+
+        @batch_task(soft_timeout=1800, hard_timeout=3500)
+        def my_task(*, x: int): ...
+    """
+
+    def _decorate(f: types.FunctionType) -> BatchTaskWrapper:
+        return BatchTaskWrapper(
+            f,
+            retry_delay=retry_delay,
+            soft_timeout=soft_timeout,
+            hard_timeout=hard_timeout,
+            queue=queue,
+            retry_on=retry_on,
+            singleton=singleton,
+            retry_singleton=retry_singleton,
+        )
+
+    if func is not None:
+        return _decorate(func)
+
     return _decorate

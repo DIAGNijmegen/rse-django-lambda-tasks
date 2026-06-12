@@ -611,3 +611,71 @@ result = send_welcome_email(user_id=1, template="welcome")
 ```
 
 This bypasses the queue entirely and runs the function in the current process. No `TaskRecord` is created, no `transaction.atomic()` block is used, and no timeout enforcement applies — it behaves exactly like calling the underlying function directly. Kwargs are still validated against the task's type annotations via Pydantic.
+
+---
+
+## AWS Batch tasks
+
+For tasks that exceed Lambda's 15-minute timeout or 10GB ephemeral storage limit, use `@batch_task` to route execution to AWS Batch containers.
+
+### 1. Define a batch task
+
+```python
+# myapp/tasks.py
+from lambda_tasks.decorators import batch_task
+
+@batch_task(soft_timeout=1800, hard_timeout=3500)
+def process_large_file(*, file_id: int) -> str:
+    # long-running work with large disk usage
+    return "done"
+```
+
+### 2. Configure AWS Batch queues
+
+```python
+# settings.py
+LAMBDA_TASKS_BATCH_QUEUES = {
+    "default": {
+        "job_queue": "arn:aws:batch:eu-west-1:123456789:job-queue/my-queue",
+        "job_definition": "arn:aws:batch:eu-west-1:123456789:job-definition/my-def:1",
+    },
+}
+```
+
+### 3. Enqueue from a view
+
+```python
+process_large_file.execute_on_commit(file_id=42)
+```
+
+### How it works
+
+1. `execute_on_commit()` enqueues a message to SQS (same as Lambda tasks)
+2. The Lambda handler picks up the message and runs the built-in `submit_batch_job` task
+3. `submit_batch_job` calls `batch.submit_job()` with the task message as a `LAMBDA_TASKS_MESSAGE` environment variable override
+4. The Batch container runs `python -m lambda_tasks.handler`, which reads the env var, performs cold-start init, and calls `execute_immediately()`
+5. The task runs with full timeout enforcement (`SIGALRM`), retry support, and `TaskRecord` tracking
+
+### Batch task timeouts
+
+Batch tasks support the same two-phase timeout mechanism as Lambda tasks (soft + hard), but with a maximum of **3600 seconds** (1 hour) instead of 900.
+
+### Retries
+
+Batch tasks support `retry_on` — when a retryable exception is raised, the retry goes back through SQS → Lambda → `submit_batch_job` → new Batch job. The same `LAMBDA_TASKS_MAX_RETRIES` limit applies.
+
+### Batch job definition setup
+
+Your Batch job definition should:
+- Use the same Docker image as your application
+- Set `DJANGO_SETTINGS_MODULE` as an environment variable
+- Configure secrets via the job definition's `secrets` field or via `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` / `LAMBDA_TASKS_SECRET_*` env vars (same mechanism as Lambda)
+- Set the default command to `["python", "-m", "lambda_tasks.handler"]`
+
+### Container overrides limit
+
+The total `containerOverrides` payload (including JSON formatting) is limited to 8192 characters by AWS Batch. For typical task kwargs (IDs, short strings) this is not a concern.
+
+### Eager and local worker modes
+
+Batch tasks respect `LAMBDA_TASKS_EAGER` and `LAMBDA_TASKS_LOCAL_WORKERS` — in development, they run in-process or in the local process pool just like Lambda tasks, without requiring AWS infrastructure.

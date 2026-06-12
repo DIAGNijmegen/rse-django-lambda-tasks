@@ -18,7 +18,7 @@ from redis.exceptions import LockError
 
 from lambda_tasks.local_executor import submit_task
 from lambda_tasks.logging import task_logger
-from lambda_tasks.settings import MAX_DELAY, LambdaTasksSettings
+from lambda_tasks.settings import MAX_DELAY, LambdaTasksSettings, TaskBackend
 from lambda_tasks.timeouts import TimeoutContext
 
 
@@ -95,14 +95,14 @@ class SQSLambdaTaskMessage(BaseModel):
             task_logger.info(f"Received {self.task_name}")
 
             # Local import to avoid circular dependency
-            from lambda_tasks.decorators import LambdaTaskWrapper
+            from lambda_tasks.decorators import BaseTaskWrapper
 
             wrapper = import_string(self.task_name)
 
-            if not isinstance(wrapper, LambdaTaskWrapper):
+            if not isinstance(wrapper, BaseTaskWrapper):
                 raise TypeError(
                     f"import_string('{self.task_name}') returned {type(wrapper)!r}, "
-                    f"expected LambdaTaskWrapper."
+                    f"expected BaseTaskWrapper."
                 )
 
             # Resolve before creating the TaskRecord — ConfigurationError here means
@@ -199,6 +199,7 @@ class SQSLambdaTaskMessage(BaseModel):
                             ),
                             delay=delay,
                             queue=wrapper.queue,
+                            backend=wrapper.backend,
                         )
                         retry_task.execute_on_commit()
 
@@ -241,13 +242,14 @@ class SQSLambdaTask(BaseModel):
     message: SQSLambdaTaskMessage
     delay: int
     queue: str
+    backend: TaskBackend = TaskBackend.LAMBDA
 
     def execute_on_commit(self) -> None:
         """Enqueue this task after the current transaction commits."""
         transaction.on_commit(self._execute)
 
     def _execute(self) -> None:
-        """Send this task to SQS (or execute eagerly).
+        """Send this task to SQS, submit to Batch, or execute eagerly.
 
         Raises:
             ImproperlyConfigured: if the queue name is not found in settings.
@@ -259,6 +261,13 @@ class SQSLambdaTask(BaseModel):
             self.message.execute_immediately(message_id=str(uuid.uuid4()))
         elif conf.LOCAL_WORKERS > 0:
             submit_task(message_json=self.message.model_dump_json())
+        elif self.backend == TaskBackend.BATCH:
+            from lambda_tasks.tasks import submit_batch_job
+
+            submit_batch_job.execute_on_commit(
+                message_json=self.message.model_dump_json(),
+                batch_queue=self.queue,
+            )
         else:
             try:
                 queue_url = conf.QUEUES[self.queue]

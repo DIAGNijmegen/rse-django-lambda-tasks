@@ -523,7 +523,7 @@ class TestExecuteTaskImportStringResolution:
     def test_non_wrapper_return_raises_type_error(self):
         msg = _make_message("some.module.plain_func", {})
         with patch("lambda_tasks.models.import_string", return_value=lambda: None):
-            with pytest.raises(TypeError, match="expected LambdaTaskWrapper"):
+            with pytest.raises(TypeError, match="expected BaseTaskWrapper"):
                 msg.execute_immediately(message_id=str(uuid.uuid4()))
 
 
@@ -551,7 +551,7 @@ def test_property_3_non_wrapper_raises_type_error(non_wrapper):
     """Property 3: for any non-LambdaTaskWrapper returned by import_string, TypeError is raised."""
     msg = _make_message("some.module.task", {})
     with patch("lambda_tasks.models.import_string", return_value=non_wrapper):
-        with pytest.raises(TypeError, match="expected LambdaTaskWrapper"):
+        with pytest.raises(TypeError, match="expected BaseTaskWrapper"):
             msg.execute_immediately(message_id=str(uuid.uuid4()))
 
 

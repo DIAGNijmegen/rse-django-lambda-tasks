@@ -15,6 +15,8 @@ warm invocations skip it.
 import logging
 import os
 import resource
+import sys
+import uuid
 
 import django
 from django.apps import apps
@@ -121,3 +123,35 @@ def handler(event: dict, context: object) -> dict:
             batch_item_failures.append({"itemIdentifier": record["messageId"]})
 
     return {"batchItemFailures": batch_item_failures}
+
+
+def main() -> int:
+    """AWS Batch container entry point.
+
+    Reads the task message from the LAMBDA_TASKS_MESSAGE environment variable,
+    constructs a synthetic SQS event, and delegates to handler().
+
+    Returns 0 on success, 1 on failure.
+    """
+    logging.basicConfig(level=logging.INFO)
+
+    message_json = os.environ.get("LAMBDA_TASKS_MESSAGE")
+    if not message_json:
+        logger.error("LAMBDA_TASKS_MESSAGE environment variable is not set.")
+        return 1
+
+    message_id = os.environ.get("AWS_BATCH_JOB_ID", str(uuid.uuid4()))
+
+    result = handler(
+        event={"Records": [{"messageId": message_id, "body": message_json}]},
+        context=None,
+    )
+
+    if result["batchItemFailures"]:
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
