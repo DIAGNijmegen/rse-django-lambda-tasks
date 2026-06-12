@@ -17,6 +17,7 @@ class TaskRecordAdmin(admin.ModelAdmin):
     list_display = (
         "pk",
         "task_name",
+        "queue",
         "status",
         "start_time",
         "end_time",
@@ -59,10 +60,17 @@ class TaskRecordAdmin(admin.ModelAdmin):
         total_seconds = d.total_seconds()
         return f"{total_seconds:.3f}s"
 
+    @admin.display(description="Queue")
+    def queue(self, obj: TaskRecord) -> str:
+        try:
+            return import_string(obj.task_name).queue
+        except Exception:
+            return "?"
+
     @admin.action(description="Replay selected tasks", permissions=("change",))
     def replay_tasks(self, request: HttpRequest, queryset: QuerySet) -> None:
         for record in queryset:
-            queue = import_string(record.task_name).queue
+            wrapper = import_string(record.task_name)
             task = SQSLambdaTask(
                 message=SQSLambdaTaskMessage(
                     task_name=record.task_name,
@@ -70,6 +78,6 @@ class TaskRecordAdmin(admin.ModelAdmin):
                     n_retries=0,
                 ),
                 delay=0,
-                queue=queue,
+                queue=wrapper.queue,
             )
             task.execute_on_commit()

@@ -4,30 +4,50 @@ inclusion: always
 
 # django-lambda-tasks
 
-A Django library for offloading tasks to AWS Lambda outside of the request-response cycle. Tasks are defined with a decorator, enqueued to SQS on transaction commit, and executed by a Lambda worker.
+A Django library for offloading tasks to AWS Lambda or AWS Batch outside of the request-response cycle. Tasks are defined with a decorator, enqueued to SQS on transaction commit, and executed by a Lambda worker or Batch container.
 
 ## Architecture
+
+### Lambda tasks
 
 ```
 View → @lambda_task.execute_on_commit() → SQS → Lambda handler → SQSLambdaTaskMessage.execute_immediately() → TaskRecord
 ```
 
+### Batch tasks (via queue config)
+
+```
+View → @lambda_task(queue="heavy").execute_on_commit() → SQS → Lambda handler → submit_batch_job → batch.submit_job()
+     → Container → python -m lambda_tasks.handler → handler() → execute_immediately() → TaskRecord
+```
+
+Retry path (Batch):
+```
+Container (retry_on exception) → execute_on_commit() → SQS → Lambda → submit_batch_job → new Batch job
+```
+
 Key modules:
-- `decorators.py` — `@lambda_task` decorator and `LambdaTaskWrapper`
-- `models.py` — `TaskRecord` (Django ORM), `SQSLambdaTaskMessage` (SQS schema + execution), `SQSLambdaTask` (routing + SQS publish or local pool submit)
+- `decorators.py` — `LambdaTaskWrapper` and `@lambda_task` decorator factory
+- `models.py` — `TaskRecord` (Django ORM), `SQSLambdaTaskMessage` (SQS schema + execution), `SQSLambdaTask` (routing + SQS publish, Batch submit, or local pool submit)
 - `local_executor.py` — `ProcessPoolExecutor`-based async local execution for development
-- `handler.py` — AWS Lambda entry point; cold-start init runs on first invocation (not at import time) with partial-batch failure reporting
+- `handler.py` — AWS Lambda entry point + AWS Batch container entry point (`main()`)
 - `logging.py` — `task_logger` for invocation-scoped log output
-- `settings.py` — lazy `LambdaTasksSettings` reading from Django settings
+- `settings.py` — lazy `LambdaTasksSettings` reading from Django settings, queue type helpers
 
 ## Task Definition
 
 ```python
-# Always kwargs-only — positional args raise TypeError at decoration time
+# Lambda task — max timeout determined by queue type (900s for SQS, 3600s for Batch)
 @lambda_task(retry_delay=30, soft_timeout=60, hard_timeout=120, queue="default",
              retry_on=(TransientError,),
              singleton=True, retry_singleton=True)
 def my_task(*, user_id: int, action: str) -> None:
+    ...
+
+# Batch task — same decorator, just routed to a Batch queue
+@lambda_task(queue="heavy", soft_timeout=1800, hard_timeout=3500,
+            retry_on=(TransientError,))
+def heavy_task(*, file_id: int) -> None:
     ...
 ```
 
@@ -35,6 +55,7 @@ def my_task(*, user_id: int, action: str) -> None:
 - Task files should be named `tasks.py` within the Django app
 - Direct call `my_task(user_id=1, action="x")` runs synchronously
 - `my_task.execute_on_commit(user_id=1, action="x")` enqueues after transaction commit
+- The execution backend (Lambda vs Batch) is determined by the queue configuration, not the decorator
 
 ## Enqueuing
 
@@ -109,7 +130,7 @@ class SQSLambdaTaskMessage(BaseModel):
 `SQSLambdaTaskMessage.execute_immediately(*, message_id: str)` in `models.py`:
 1. Checks for an existing `TaskRecord` with the same `pk` (`message_id`) via `get_or_create`
 2. If a record already exists (any status), logs and returns immediately — duplicate deliveries are silently skipped
-3. Resolves timeouts: decorator default → settings defaults (soft=270s, hard=300s)
+3. Resolves timeouts: decorator default → settings defaults (soft=270s, hard=300s), validated against queue max (900 for SQS, 3600 for Batch)
 4. If `wrapper.singleton` is `True`, acquires a Redis lock via `caches[SINGLETON_CACHE].lock(lock_key)` wrapping the atomic block; if `False`, no lock is acquired
 5. Runs task inside `transaction.atomic()` + `TimeoutContext`
 6. On success: updates record to `SUCCESS` with result and `end_time`
@@ -131,6 +152,12 @@ class SQSLambdaTaskMessage(BaseModel):
 - Both loaders run unconditionally (outside the `DJANGO_SETTINGS_MODULE` check) — the environment secret may provide that var, and individual secrets may depend on environment-loaded vars
 - A temporary `StreamHandler` is attached to the `lambda_tasks` logger for the duration of the loaders so their log output is visible before Django's `LOGGING` dictConfig has run; it is removed immediately after so that Django's configuration is the sole authority on logging from that point on
 - `resource.setrlimit(RLIMIT_DATA)` is set from `AWS_LAMBDA_FUNCTION_MEMORY_SIZE` so that excessive allocation raises `MemoryError` instead of triggering the OOM killer
+
+`main()` in `handler.py` — AWS Batch container entry point (`python -m lambda_tasks.handler`):
+- Reads `LAMBDA_TASKS_MESSAGE` env var (the serialized task JSON, set by `submit_batch_job` via container overrides)
+- Uses `AWS_BATCH_JOB_ID` as the `message_id` (falls back to UUID4 if not set)
+- Constructs a synthetic SQS event and delegates to `handler()` — reuses the full cold-start and execution path
+- Returns exit code 0 on success, 1 on failure
 
 ## Environment Loader
 
@@ -169,7 +196,7 @@ Behaviour:
 
 - `TaskRecord` — Django ORM model; persists task execution state with statuses `RUNNING`, `SUCCESS`, `FAILED`, `RETRYING`
 - `SQSLambdaTaskMessage` — Pydantic model; the SQS message schema; `execute_immediately()` runs the task inside `transaction.atomic()` + `TimeoutContext`
-- `SQSLambdaTask` — Pydantic model; holds a `SQSLambdaTaskMessage` plus routing fields (`delay`, `queue`); `_execute()` publishes to SQS or executes eagerly; `execute_on_commit()` registers `_execute` with `transaction.on_commit`
+- `SQSLambdaTask` — Pydantic model; holds a `SQSLambdaTaskMessage` plus routing fields (`delay`, `queue`); `_execute()` inspects queue config to publish to SQS, submit to Batch via `submit_batch_job`, or execute eagerly/locally; `execute_on_commit()` registers `_execute` with `transaction.on_commit`
 
 ## TaskRecord Model
 
@@ -183,7 +210,7 @@ Statuses: `RUNNING`, `SUCCESS`, `FAILED`, `RETRYING`
 
 | Setting | Default | Description |
 |---|---|---|
-| `LAMBDA_TASKS_QUEUES` | — | Dict of `{queue_name: sqs_url}`, must include `"default"` |
+| `LAMBDA_TASKS_QUEUES` | — | Dict of `{queue_name: queue_config}`. Each value is a dict with either `queue_url` (SQS) or `job_queue_arn`+`job_definition_arn` (Batch). Must include `"default"` which must be SQS. |
 | `LAMBDA_TASKS_DEFAULT_SOFT_TIMEOUT` | `270` | Soft timeout in seconds |
 | `LAMBDA_TASKS_DEFAULT_HARD_TIMEOUT` | `300` | Hard timeout in seconds |
 | `LAMBDA_TASKS_EAGER` | `False` | Run tasks synchronously in-process (no SQS) |
@@ -191,7 +218,7 @@ Statuses: `RUNNING`, `SUCCESS`, `FAILED`, `RETRYING`
 | `LAMBDA_TASKS_MAX_RETRIES` | `2880` | Maximum retry attempts before `MaxRetriesExceededError` is raised (60 × 24 × 2) |
 | `LAMBDA_TASKS_SINGLETON_CACHE` | `"default"` | Django cache backend used for singleton task locks |
 
-`LAMBDA_TASKS_QUEUES` must be set and include a `"default"` key. Both timeout values must be greater than zero and at most `900` seconds. `soft_timeout` must always be strictly less than `hard_timeout`.
+`LAMBDA_TASKS_QUEUES` must be set and include a `"default"` key. The `"default"` queue must be an SQS queue. Both timeout values must be greater than zero and `soft_timeout` must always be strictly less than `hard_timeout`. The maximum allowed timeout depends on the queue type: 900 for SQS, 3600 for Batch.
 
 ## Eager Mode
 
@@ -261,6 +288,7 @@ def my_task(*, user_id: int) -> None:
 `lambda_tasks.tasks` provides maintenance tasks that ship with the library:
 
 - `cleanup_task_records(*, retention_days: int = 7) -> int` — deletes `TaskRecord` rows whose `start_time` is strictly older than `retention_days`. Returns the number of deleted rows. Decorated with `@lambda_task` so it can be enqueued via `cleanup_task_records.execute_on_commit()` or called directly. Users are responsible for scheduling (e.g. EventBridge rule, cron, management command).
+- `submit_batch_job(*, message_json: str, batch_queue: str) -> str` — submits a batch task to AWS Batch. Reads `job_queue_arn` and `job_definition_arn` from `LAMBDA_TASKS_QUEUES[batch_queue]`, sanitizes the task name for use as `jobName`, and calls `batch.submit_job()` with the message passed as a `LAMBDA_TASKS_MESSAGE` environment variable override. Returns the Batch job ID. This task is enqueued automatically by `SQSLambdaTask._execute()` when the queue is a Batch queue — users do not call it directly.
 
 ## Conventions
 

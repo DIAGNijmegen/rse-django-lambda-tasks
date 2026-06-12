@@ -66,6 +66,9 @@ USE_TZ = True
 
 # Local mode: tasks execute in process pool (no SQS required)
 LAMBDA_TASKS_LOCAL_WORKERS = 2
+LAMBDA_TASKS_QUEUES = {
+    "default": {"queue_url": "https://sqs.localhost/default"},
+}
 
 LOGGING = {
     "version": 1,

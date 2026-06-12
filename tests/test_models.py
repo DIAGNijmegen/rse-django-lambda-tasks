@@ -709,9 +709,13 @@ from lambda_tasks.models import SQSLambdaTask
 
 _QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/000000000000/default"
 _HIGH_MEM_URL = "https://sqs.us-east-1.amazonaws.com/000000000000/high-memory"
-_QUEUES_MAP = {"default": _QUEUE_URL, "high_memory": _HIGH_MEM_URL}
+_QUEUES_MAP = {
+    "default": {"queue_url": _QUEUE_URL},
+    "high_memory": {"queue_url": _HIGH_MEM_URL},
+}
+
 _MESSAGE = SQSLambdaTaskMessage(
-    task_name="myapp.tasks.my_task",
+    task_name="lambda_tasks.tasks.cleanup_task_records",
     kwargs={},
 )
 
@@ -726,14 +730,14 @@ def mock_boto3_sqs():
 
 @pytest.mark.django_db
 def test_send_known_queue_uses_correct_queue_url(settings, mock_boto3_sqs):
-    settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
+    settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": _QUEUE_URL}}
     SQSLambdaTask(message=_MESSAGE, delay=0, queue="default")._execute()
     assert mock_boto3_sqs.send_message.call_args.kwargs["QueueUrl"] == _QUEUE_URL
 
 
 @pytest.mark.django_db
 def test_send_known_queue_uses_correct_delay_seconds(settings, mock_boto3_sqs):
-    settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
+    settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": _QUEUE_URL}}
     SQSLambdaTask(message=_MESSAGE, delay=42, queue="default")._execute()
     assert mock_boto3_sqs.send_message.call_args.kwargs["DelaySeconds"] == 42
 
@@ -741,8 +745,8 @@ def test_send_known_queue_uses_correct_delay_seconds(settings, mock_boto3_sqs):
 @pytest.mark.django_db
 def test_send_named_queue_routes_to_correct_url(settings, mock_boto3_sqs):
     settings.LAMBDA_TASKS_QUEUES = {
-        "default": _QUEUE_URL,
-        "high_memory": _HIGH_MEM_URL,
+        "default": {"queue_url": _QUEUE_URL},
+        "high_memory": {"queue_url": _HIGH_MEM_URL},
     }
     SQSLambdaTask(message=_MESSAGE, delay=0, queue="high_memory")._execute()
     assert mock_boto3_sqs.send_message.call_args.kwargs["QueueUrl"] == _HIGH_MEM_URL
@@ -750,7 +754,7 @@ def test_send_named_queue_routes_to_correct_url(settings, mock_boto3_sqs):
 
 @pytest.mark.django_db
 def test_send_unknown_queue_raises_improperly_configured(settings, mock_boto3_sqs):
-    settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
+    settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": _QUEUE_URL}}
     with pytest.raises(ImproperlyConfigured):
         SQSLambdaTask(message=_MESSAGE, delay=0, queue="nonexistent")._execute()
     mock_boto3_sqs.send_message.assert_not_called()
@@ -758,7 +762,7 @@ def test_send_unknown_queue_raises_improperly_configured(settings, mock_boto3_sq
 
 @pytest.mark.django_db
 def test_send_boto3_exception_propagates(settings, mock_boto3_sqs):
-    settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
+    settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": _QUEUE_URL}}
     mock_boto3_sqs.send_message.side_effect = RuntimeError("SQS unavailable")
     with pytest.raises(RuntimeError, match="SQS unavailable"):
         SQSLambdaTask(message=_MESSAGE, delay=0, queue="default")._execute()
@@ -766,14 +770,14 @@ def test_send_boto3_exception_propagates(settings, mock_boto3_sqs):
 
 @pytest.mark.django_db
 def test_send_delay_zero_passed_as_delay_seconds(settings, mock_boto3_sqs):
-    settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
+    settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": _QUEUE_URL}}
     SQSLambdaTask(message=_MESSAGE, delay=0, queue="default")._execute()
     assert mock_boto3_sqs.send_message.call_args.kwargs["DelaySeconds"] == 0
 
 
 @pytest.mark.django_db
 def test_send_eager_mode_executes_in_process(settings):
-    settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
+    settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": _QUEUE_URL}}
     settings.LAMBDA_TASKS_EAGER = True
     with (
         patch(
@@ -788,10 +792,10 @@ def test_send_eager_mode_executes_in_process(settings):
 
 @pytest.mark.django_db(transaction=True)
 def test_on_commit_valid_dict_calls_send_message(settings, mock_boto3_sqs):
-    settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
+    settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": _QUEUE_URL}}
     deferred = {
         "message": {
-            "task_name": "myapp.tasks.my_task",
+            "task_name": "lambda_tasks.tasks.cleanup_task_records",
             "kwargs": {"x": 1},
         },
         "delay": 5,
@@ -809,10 +813,10 @@ def test_on_commit_valid_dict_calls_send_message(settings, mock_boto3_sqs):
 def test_on_commit_invalid_dict_raises_validation_error(settings, mock_boto3_sqs):
     from pydantic import ValidationError
 
-    settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
+    settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": _QUEUE_URL}}
     deferred = {
         "message": {
-            "task_name": "myapp.tasks.my_task",
+            "task_name": "lambda_tasks.tasks.cleanup_task_records",
             "kwargs": {},
         },
         "delay": 5,
@@ -825,11 +829,11 @@ def test_on_commit_invalid_dict_raises_validation_error(settings, mock_boto3_sqs
 
 @pytest.mark.django_db(transaction=True)
 def test_on_commit_eager_mode_executes_in_process(settings):
-    settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
+    settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": _QUEUE_URL}}
     settings.LAMBDA_TASKS_EAGER = True
     deferred = {
         "message": {
-            "task_name": "myapp.tasks.my_task",
+            "task_name": "lambda_tasks.tasks.cleanup_task_records",
             "kwargs": {},
         },
         "delay": 0,
@@ -848,15 +852,14 @@ def test_on_commit_eager_mode_executes_in_process(settings):
 
 
 _deferred_msg_st = st.builds(
-    lambda message, delay, queue: {"message": message, "delay": delay, "queue": queue},
-    message=st.builds(
-        lambda task_name, kwargs: {
-            "task_name": task_name,
-            "kwargs": kwargs,
+    lambda delay, queue: {
+        "message": {
+            "task_name": "lambda_tasks.tasks.cleanup_task_records",
+            "kwargs": {},
         },
-        task_name=st.from_regex(r"[a-z]+\.[a-z]+", fullmatch=True),
-        kwargs=st.fixed_dictionaries({}),
-    ),
+        "delay": delay,
+        "queue": queue,
+    },
     delay=st.integers(min_value=0, max_value=900),
     queue=st.sampled_from(["default", "high_memory"]),
 )
@@ -874,7 +877,8 @@ def test_property_send_queue_routing_valid_names(settings, queue_name):
         mock_b3.client.return_value = mock_client
         SQSLambdaTask(message=_MESSAGE, delay=0, queue=queue_name)._execute()
     assert (
-        mock_client.send_message.call_args.kwargs["QueueUrl"] == _QUEUES_MAP[queue_name]
+        mock_client.send_message.call_args.kwargs["QueueUrl"]
+        == _QUEUES_MAP[queue_name]["queue_url"]
     )
 
 
@@ -913,7 +917,7 @@ _SQS_ERRORS = [
 )
 @pytest.mark.django_db
 def test_property_send_sqs_failure_propagates(settings, exc):
-    settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
+    settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": _QUEUE_URL}}
     with patch("lambda_tasks.models.boto3") as mock_b3:
         mock_client = MagicMock()
         mock_b3.client.return_value = mock_client
@@ -942,7 +946,7 @@ def test_property_on_commit_passes_all_fields(settings, msg):
     assert body["task_name"] == msg["message"]["task_name"]
     assert body["kwargs"] == msg["message"]["kwargs"]
     assert call_kwargs["DelaySeconds"] == msg["delay"]
-    assert call_kwargs["QueueUrl"] == _QUEUES_MAP[msg["queue"]]
+    assert call_kwargs["QueueUrl"] == _QUEUES_MAP[msg["queue"]]["queue_url"]
 
 
 @pytest.mark.django_db
@@ -956,7 +960,7 @@ def test_property_on_commit_rejects_invalid_dicts(settings, missing_field):
     settings.LAMBDA_TASKS_QUEUES = _QUEUES_MAP
     valid = {
         "message": {
-            "task_name": "myapp.tasks.my_task",
+            "task_name": "lambda_tasks.tasks.cleanup_task_records",
             "kwargs": {},
         },
         "delay": 0,
@@ -1006,7 +1010,7 @@ def test_property_3_n_retries_negative_raises_validation_error(n: int) -> None:
 
     with pytest.raises(ValidationError):
         SQSLambdaTaskMessage(
-            task_name="myapp.tasks.my_task",
+            task_name="lambda_tasks.tasks.cleanup_task_records",
             kwargs={},
             n_retries=n,
         )
@@ -1017,7 +1021,7 @@ def test_property_3_n_retries_negative_raises_validation_error(n: int) -> None:
 def test_property_3_n_retries_non_negative_succeeds(n: int) -> None:
     """Property 3 (non-negative): constructing SQSLambdaTaskMessage with _n_retries >= 0 succeeds."""
     msg = SQSLambdaTaskMessage(
-        task_name="myapp.tasks.my_task",
+        task_name="lambda_tasks.tasks.cleanup_task_records",
         kwargs={},
         n_retries=n,
     )
@@ -1387,11 +1391,9 @@ def test_retry_delay_zero_produces_jitter_in_range():
 def test_normal_execute_on_commit_uses_call_time_delay(settings, call_delay):
     """Property 6: normal execute_on_commit uses _delay passed at call time.
     Validates: Requirements 4.3, 4.4"""
-    settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
+    settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": _QUEUE_URL}}
 
-    @lambda_task(retry_on=(ValueError,), retry_delay=30)
-    def _task_for_normal_enqueue(*, x: int) -> None:
-        pass
+    from lambda_tasks.tasks import cleanup_task_records
 
     with patch("lambda_tasks.models.boto3") as mock_b3:
         mock_client = MagicMock()
@@ -1399,7 +1401,7 @@ def test_normal_execute_on_commit_uses_call_time_delay(settings, call_delay):
         import django.db.transaction as _transaction
 
         with _transaction.atomic():
-            _task_for_normal_enqueue.execute_on_commit(x=1, _delay=call_delay)
+            cleanup_task_records.execute_on_commit(_delay=call_delay)
 
     mock_client.send_message.assert_called_once()
     assert mock_client.send_message.call_args.kwargs["DelaySeconds"] == call_delay
@@ -1408,11 +1410,9 @@ def test_normal_execute_on_commit_uses_call_time_delay(settings, call_delay):
 @pytest.mark.django_db(transaction=True)
 def test_normal_execute_on_commit_defaults_delay_to_zero(settings):
     """execute_on_commit without _delay defaults to 0."""
-    settings.LAMBDA_TASKS_QUEUES = {"default": _QUEUE_URL}
+    settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": _QUEUE_URL}}
 
-    @lambda_task
-    def _task_no_delay(*, x: int) -> None:
-        pass
+    from lambda_tasks.tasks import cleanup_task_records
 
     with patch("lambda_tasks.models.boto3") as mock_b3:
         mock_client = MagicMock()
@@ -1420,7 +1420,7 @@ def test_normal_execute_on_commit_defaults_delay_to_zero(settings):
         import django.db.transaction as _transaction
 
         with _transaction.atomic():
-            _task_no_delay.execute_on_commit(x=1)
+            cleanup_task_records.execute_on_commit()
 
     mock_client.send_message.assert_called_once()
     assert mock_client.send_message.call_args.kwargs["DelaySeconds"] == 0

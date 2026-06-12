@@ -12,7 +12,6 @@ import pydantic
 import pytest
 
 from lambda_tasks.decorators import LambdaTaskWrapper
-from lambda_tasks.settings import MAX_TIMEOUT
 
 
 def sample_task(*, x: int, y: str = "hello") -> str:
@@ -325,7 +324,7 @@ def test_property_6_underscore_params_rejected_at_construction(suffix):
 )
 @h_settings(max_examples=100)
 def test_property_7_invalid_timeouts_rejected_at_construction(soft, delta):
-    """Property 7: soft >= hard or either > 900 → ValueError at construction."""
+    """Property 7: soft >= hard → ValueError at construction."""
     hard = soft - delta  # hard <= soft, always invalid
 
     def _f(*, x: int) -> None:
@@ -337,13 +336,13 @@ def test_property_7_invalid_timeouts_rejected_at_construction(soft, delta):
 
 # Feature: import-string-task-resolution, Property 8: Valid inputs produce a correctly-attributed wrapper
 @given(
-    soft=st.integers(min_value=1, max_value=899),
+    soft=st.integers(min_value=1, max_value=3599),
     delta=st.integers(min_value=1, max_value=10),
 )
 @h_settings(max_examples=100)
 def test_property_8_valid_inputs_produce_correct_wrapper(soft, delta):
     """Property 8: valid (func, soft, hard) → wrapper with correct attributes."""
-    hard = min(soft + delta, 900)
+    hard = min(soft + delta, 3600)
     if soft >= hard:
         return  # skip degenerate cases from clamping
 
@@ -402,7 +401,7 @@ class TestOnCommitTimeoutValidation:
         mock_enqueuer.assert_not_called()
 
     def test_valid_soft_lt_hard_does_not_raise(self, settings, mock_enqueuer):
-        settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
+        settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": QUEUE_URL}}
         wrapper = _make_wrapper(soft_timeout=60, hard_timeout=120)
         # Should not raise
         wrapper.execute_on_commit(x=1)
@@ -415,14 +414,14 @@ class TestOnCommitTimeoutValidation:
 class TestOnCommitOutsideTransaction:
     def test_dispatches_immediately_outside_transaction(self, settings, mock_enqueuer):
         """Outside a transaction, transaction.on_commit fires the callback immediately."""
-        settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
+        settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": QUEUE_URL}}
         wrapper = _make_wrapper()
         wrapper.execute_on_commit(x=1, y="hello")
         # Should have been called immediately (no active transaction)
         mock_enqueuer.assert_called_once()
 
     def test_enqueue_called_with_correct_task_name(self, settings):
-        settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
+        settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": QUEUE_URL}}
         wrapper = _make_wrapper()
         captured: list = []
         with patch(
@@ -435,7 +434,7 @@ class TestOnCommitOutsideTransaction:
         assert deferred_task.message.task_name == expected
 
     def test_enqueue_called_with_task_kwargs(self, settings):
-        settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
+        settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": QUEUE_URL}}
         wrapper = _make_wrapper()
         captured: list = []
         with patch(
@@ -447,7 +446,7 @@ class TestOnCommitOutsideTransaction:
         assert deferred_task.message.kwargs == {"x": 7, "y": "world"}
 
     def test_override_delay_passed_to_enqueue(self, settings):
-        settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
+        settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": QUEUE_URL}}
         wrapper = _make_wrapper()
         captured: list = []
         with patch(
@@ -458,7 +457,7 @@ class TestOnCommitOutsideTransaction:
         assert captured[0].__self__.delay == 30
 
     def test_wrapper_default_delay_used_when_no_override(self, settings):
-        settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
+        settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": QUEUE_URL}}
         wrapper = _make_wrapper()
         captured: list = []
         with patch(
@@ -471,8 +470,10 @@ class TestOnCommitOutsideTransaction:
     def test_override_queue_passed_to_enqueue_is_not_supported(self, settings):
         """_queue is not a supported override — it should be rejected as an unknown kwarg."""
         settings.LAMBDA_TASKS_QUEUES = {
-            "default": QUEUE_URL,
-            "high_memory": "https://sqs.us-east-1.amazonaws.com/000000000000/high-memory",
+            "default": {"queue_url": QUEUE_URL},
+            "high_memory": {
+                "queue_url": "https://sqs.us-east-1.amazonaws.com/000000000000/high-memory"
+            },
         }
         wrapper = _make_wrapper()
         with pytest.raises(Exception):
@@ -486,7 +487,7 @@ class TestOnCommitOutsideTransaction:
 class TestOnCommitInsideTransaction:
     def test_does_not_dispatch_before_commit(self, settings, mock_enqueuer):
         """Inside an atomic block, enqueue must NOT be called before commit."""
-        settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
+        settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": QUEUE_URL}}
         wrapper = _make_wrapper()
         with django.db.transaction.atomic():
             wrapper.execute_on_commit(x=1)
@@ -495,7 +496,7 @@ class TestOnCommitInsideTransaction:
 
     def test_dispatches_after_commit(self, settings, mock_enqueuer):
         """After the atomic block commits, enqueue should be called exactly once."""
-        settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
+        settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": QUEUE_URL}}
         wrapper = _make_wrapper()
         with django.db.transaction.atomic():
             wrapper.execute_on_commit(x=1)
@@ -589,56 +590,31 @@ def test_property_eager_always_executes_synchronously(value):
 
 
 # ---------------------------------------------------------------------------
-# Task 4 — 900s timeout cap
+# Task 4 — timeout upper bound (now validated at resolution time, not decoration time)
 # ---------------------------------------------------------------------------
 
 
-# --- 4.1 Decoration time ---
+# --- 4.1 Decoration time: large timeouts now accepted ---
 
 
-@given(v=st.integers(min_value=MAX_TIMEOUT + 1, max_value=MAX_TIMEOUT + 10000))
-@h_settings(max_examples=100)
-def test_property_soft_timeout_over_900_rejected_at_decoration(v):
-    """soft_timeout > 900 must raise ValueError at decoration time."""
+def test_soft_timeout_over_900_accepted_at_decoration():
+    """soft_timeout > 900 is accepted at decoration time (validated at resolution)."""
 
     def _f(*, x: int) -> None:
         pass
 
-    with pytest.raises(ValueError):
-        lambda_task(_f, soft_timeout=v, hard_timeout=v + 1)
+    wrapper = lambda_task(_f, soft_timeout=1800, hard_timeout=3500)
+    assert wrapper._soft_timeout == 1800
 
 
-@given(v=st.integers(min_value=MAX_TIMEOUT + 1, max_value=MAX_TIMEOUT + 10000))
-@h_settings(max_examples=100)
-def test_property_hard_timeout_over_900_rejected_at_decoration(v):
-    """hard_timeout > 900 must raise ValueError at decoration time."""
+def test_hard_timeout_over_900_accepted_at_decoration():
+    """hard_timeout > 900 is accepted at decoration time (validated at resolution)."""
 
     def _f(*, x: int) -> None:
         pass
 
-    with pytest.raises(ValueError):
-        lambda_task(_f, soft_timeout=1, hard_timeout=v)
-
-
-# --- 4.4 Regression: valid pairs still work ---
-
-
-@given(
-    soft=st.integers(min_value=1, max_value=MAX_TIMEOUT - 1),
-    delta=st.integers(min_value=1, max_value=10),
-)
-@h_settings(max_examples=100)
-def test_property_valid_timeout_pair_accepted_at_decoration(soft, delta):
-    """Valid timeout pairs (both ≤ 900, soft < hard) must not raise."""
-    hard = min(soft + delta, MAX_TIMEOUT)
-    if soft >= hard:
-        return  # skip degenerate cases from clamping
-
-    def _f(*, x: int) -> None:
-        pass
-
-    wrapper = lambda_task(_f, soft_timeout=soft, hard_timeout=hard)
-    assert wrapper is not None
+    wrapper = lambda_task(_f, soft_timeout=1, hard_timeout=1800)
+    assert wrapper._hard_timeout == 1800
 
 
 # ---------------------------------------------------------------------------
@@ -680,17 +656,17 @@ def test_property_3_eager_mode_writes_task_record(value):
 # ---------------------------------------------------------------------------
 
 
-@given(v=st.integers(min_value=MAX_TIMEOUT + 1, max_value=MAX_TIMEOUT + 10000))
+@given(v=st.integers(min_value=901, max_value=10000))
 @h_settings(max_examples=100)
-def test_resolved_timeouts_raises_when_settings_soft_over_900(v):
-    """soft from settings > 900 must raise ValueError on resolved_timeouts."""
+def test_resolved_timeouts_raises_when_settings_soft_over_max_for_sqs(v):
+    """soft from settings > 900 must raise ValueError on resolved_timeouts for SQS queue."""
 
     def _f(*, x: int) -> None:
         pass
 
-    wrapper = lambda_task(_f)  # no decorator timeouts
-    wrapper.__dict__.pop("_resolved_timeouts_cache", None)
+    wrapper = lambda_task(_f)  # default queue
     with override_settings(
+        LAMBDA_TASKS_QUEUES={"default": {"queue_url": "https://sqs.example.com/q"}},
         LAMBDA_TASKS_DEFAULT_SOFT_TIMEOUT=v,
         LAMBDA_TASKS_DEFAULT_HARD_TIMEOUT=v + 1,
     ):
@@ -698,17 +674,17 @@ def test_resolved_timeouts_raises_when_settings_soft_over_900(v):
             _ = wrapper.resolved_timeouts
 
 
-@given(v=st.integers(min_value=MAX_TIMEOUT + 1, max_value=MAX_TIMEOUT + 10000))
+@given(v=st.integers(min_value=901, max_value=10000))
 @h_settings(max_examples=100)
-def test_resolved_timeouts_raises_when_settings_hard_over_900(v):
-    """hard from settings > 900 must raise ValueError on resolved_timeouts."""
+def test_resolved_timeouts_raises_when_settings_hard_over_max_for_sqs(v):
+    """hard from settings > 900 must raise ValueError on resolved_timeouts for SQS queue."""
 
     def _f(*, x: int) -> None:
         pass
 
-    wrapper = lambda_task(_f)  # no decorator timeouts
-    wrapper.__dict__.pop("_resolved_timeouts_cache", None)
+    wrapper = lambda_task(_f)  # default queue
     with override_settings(
+        LAMBDA_TASKS_QUEUES={"default": {"queue_url": "https://sqs.example.com/q"}},
         LAMBDA_TASKS_DEFAULT_SOFT_TIMEOUT=1,
         LAMBDA_TASKS_DEFAULT_HARD_TIMEOUT=v,
     ):
@@ -717,8 +693,8 @@ def test_resolved_timeouts_raises_when_settings_hard_over_900(v):
 
 
 @given(
-    soft=st.integers(min_value=1, max_value=3600),
-    delta=st.integers(min_value=0, max_value=3600),
+    soft=st.integers(min_value=1, max_value=900),
+    delta=st.integers(min_value=0, max_value=900),
 )
 @h_settings(max_examples=100)
 def test_resolved_timeouts_raises_when_settings_soft_ge_hard(soft, delta):
@@ -729,8 +705,8 @@ def test_resolved_timeouts_raises_when_settings_soft_ge_hard(soft, delta):
         pass
 
     wrapper = lambda_task(_f)
-    wrapper.__dict__.pop("_resolved_timeouts_cache", None)
     with override_settings(
+        LAMBDA_TASKS_QUEUES={"default": {"queue_url": "https://sqs.example.com/q"}},
         LAMBDA_TASKS_DEFAULT_SOFT_TIMEOUT=soft,
         LAMBDA_TASKS_DEFAULT_HARD_TIMEOUT=hard,
     ):
@@ -762,21 +738,21 @@ class TestOnCommitKwargsValidation:
     # --- type mismatches ---
 
     def test_wrong_type_raises_type_error(self, settings, mock_enqueuer):
-        settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
+        settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": QUEUE_URL}}
         wrapper = LambdaTaskWrapper(_typed_task)
         with pytest.raises(pydantic.ValidationError, match="count"):
             wrapper.execute_on_commit(count="not-an-int", label="hi")
         mock_enqueuer.assert_not_called()
 
     def test_second_arg_wrong_type_raises_type_error(self, settings, mock_enqueuer):
-        settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
+        settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": QUEUE_URL}}
         wrapper = LambdaTaskWrapper(_typed_task)
         with pytest.raises(pydantic.ValidationError, match="label"):
             wrapper.execute_on_commit(count=1, label=99)
         mock_enqueuer.assert_not_called()
 
     def test_correct_types_do_not_raise(self, settings, mock_enqueuer):
-        settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
+        settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": QUEUE_URL}}
         wrapper = LambdaTaskWrapper(_typed_task)
         wrapper.execute_on_commit(count=1, label="ok", flag=True)
         mock_enqueuer.assert_called_once()
@@ -784,19 +760,19 @@ class TestOnCommitKwargsValidation:
     # --- Optional / X | None ---
 
     def test_none_accepted_for_optional_param(self, settings, mock_enqueuer):
-        settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
+        settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": QUEUE_URL}}
         wrapper = LambdaTaskWrapper(_optional_task)
         wrapper.execute_on_commit(value=None)
         mock_enqueuer.assert_called_once()
 
     def test_int_accepted_for_optional_param(self, settings, mock_enqueuer):
-        settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
+        settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": QUEUE_URL}}
         wrapper = LambdaTaskWrapper(_optional_task)
         wrapper.execute_on_commit(value=42)
         mock_enqueuer.assert_called_once()
 
     def test_wrong_type_for_optional_param_raises(self, settings, mock_enqueuer):
-        settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
+        settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": QUEUE_URL}}
         wrapper = LambdaTaskWrapper(_optional_task)
         with pytest.raises(pydantic.ValidationError, match="value"):
             wrapper.execute_on_commit(value="nope")
@@ -823,14 +799,14 @@ class TestOnCommitKwargsValidation:
     # --- signature binding errors ---
 
     def test_missing_required_kwarg_raises_type_error(self, settings, mock_enqueuer):
-        settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
+        settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": QUEUE_URL}}
         wrapper = LambdaTaskWrapper(_typed_task)
         with pytest.raises(pydantic.ValidationError):
             wrapper.execute_on_commit(count=1)  # label is required
         mock_enqueuer.assert_not_called()
 
     def test_unexpected_kwarg_raises_type_error(self, settings, mock_enqueuer):
-        settings.LAMBDA_TASKS_QUEUES = {"default": QUEUE_URL}
+        settings.LAMBDA_TASKS_QUEUES = {"default": {"queue_url": QUEUE_URL}}
         wrapper = LambdaTaskWrapper(_typed_task)
         with pytest.raises(pydantic.ValidationError):
             wrapper.execute_on_commit(count=1, label="hi", nonexistent=True)

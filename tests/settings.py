@@ -13,3 +13,7 @@ INSTALLED_APPS = [
 ]
 
 USE_TZ = True
+
+LAMBDA_TASKS_QUEUES = {
+    "default": {"queue_url": "https://sqs.localhost/default"},
+}

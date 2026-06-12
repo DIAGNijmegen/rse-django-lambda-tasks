@@ -449,7 +449,7 @@ class TestDispatchRouting:
         settings.LAMBDA_TASKS_EAGER = False
 
         message = SQSLambdaTaskMessage(
-            task_name="myapp.tasks.foo",
+            task_name="lambda_tasks.tasks.cleanup_task_records",
             kwargs={"user_id": 1},
             n_retries=0,
         )
@@ -473,7 +473,7 @@ class TestDispatchRouting:
         settings.LAMBDA_TASKS_EAGER = False
 
         message = SQSLambdaTaskMessage(
-            task_name="myapp.tasks.foo",
+            task_name="lambda_tasks.tasks.cleanup_task_records",
             kwargs={"user_id": 1},
             n_retries=0,
         )
@@ -497,11 +497,11 @@ class TestDispatchRouting:
         settings.LAMBDA_TASKS_LOCAL_WORKERS = 0
         settings.LAMBDA_TASKS_EAGER = False
         settings.LAMBDA_TASKS_QUEUES = {
-            "default": "https://sqs.us-east-1.amazonaws.com/000/default",
+            "default": {"queue_url": "https://sqs.us-east-1.amazonaws.com/000/default"},
         }
 
         message = SQSLambdaTaskMessage(
-            task_name="myapp.tasks.foo",
+            task_name="lambda_tasks.tasks.cleanup_task_records",
             kwargs={"user_id": 1},
             n_retries=0,
         )
@@ -531,7 +531,7 @@ class TestDispatchRouting:
             delattr(settings, "LAMBDA_TASKS_LOCAL_WORKERS")
 
         message = SQSLambdaTaskMessage(
-            task_name="myapp.tasks.foo",
+            task_name="lambda_tasks.tasks.cleanup_task_records",
             kwargs={"user_id": 1},
             n_retries=0,
         )
@@ -603,7 +603,7 @@ class TestTransactionCommitIntegration:
         settings.LAMBDA_TASKS_EAGER = False
 
         message = SQSLambdaTaskMessage(
-            task_name="myapp.tasks.foo",
+            task_name="lambda_tasks.tasks.cleanup_task_records",
             kwargs={"user_id": 1},
             n_retries=0,
         )
@@ -633,7 +633,7 @@ class TestTransactionCommitIntegration:
         settings.LAMBDA_TASKS_EAGER = False
 
         message = SQSLambdaTaskMessage(
-            task_name="myapp.tasks.foo",
+            task_name="lambda_tasks.tasks.cleanup_task_records",
             kwargs={"user_id": 1},
             n_retries=0,
         )

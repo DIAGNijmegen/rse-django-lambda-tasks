@@ -18,7 +18,7 @@ from redis.exceptions import LockError
 
 from lambda_tasks.local_executor import submit_task
 from lambda_tasks.logging import task_logger
-from lambda_tasks.settings import MAX_DELAY, LambdaTasksSettings
+from lambda_tasks.settings import MAX_DELAY, BatchQueueConfig, LambdaTasksSettings
 from lambda_tasks.timeouts import TimeoutContext
 
 
@@ -247,7 +247,7 @@ class SQSLambdaTask(BaseModel):
         transaction.on_commit(self._execute)
 
     def _execute(self) -> None:
-        """Send this task to SQS (or execute eagerly).
+        """Send this task to SQS, submit to Batch, or execute eagerly.
 
         Raises:
             ImproperlyConfigured: if the queue name is not found in settings.
@@ -261,14 +261,24 @@ class SQSLambdaTask(BaseModel):
             submit_task(message_json=self.message.model_dump_json())
         else:
             try:
-                queue_url = conf.QUEUES[self.queue]
+                queue_config = conf.QUEUES[self.queue]
             except KeyError:
                 raise ImproperlyConfigured(
                     f"Queue '{self.queue}' is not defined in LAMBDA_TASKS_QUEUES."
                 )
-            client = boto3.client("sqs")
-            client.send_message(
-                QueueUrl=queue_url,
-                MessageBody=self.message.model_dump_json(),
-                DelaySeconds=self.delay,
-            )
+
+            if isinstance(queue_config, BatchQueueConfig):
+                from lambda_tasks.tasks import submit_batch_job
+
+                submit_batch_job.execute_on_commit(
+                    message_json=self.message.model_dump_json(),
+                    batch_queue=self.queue,
+                    _delay=self.delay,
+                )
+            else:
+                client = boto3.client("sqs")
+                client.send_message(
+                    QueueUrl=queue_config.queue_url,
+                    MessageBody=self.message.model_dump_json(),
+                    DelaySeconds=self.delay,
+                )

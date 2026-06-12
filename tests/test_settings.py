@@ -9,8 +9,10 @@ from hypothesis import given
 from hypothesis import settings as h_settings
 from hypothesis import strategies as st
 
-DEFAULT_URL = "https://sqs.us-east-1.amazonaws.com/000000000000/default"
-QUEUES = {"default": DEFAULT_URL}
+DEFAULT_QUEUE = {
+    "queue_url": "https://sqs.us-east-1.amazonaws.com/000000000000/default"
+}
+QUEUES = {"default": DEFAULT_QUEUE}
 
 
 def test_missing_queues_setting_raises(settings):
@@ -26,7 +28,7 @@ def test_queues_without_default_key_raises(settings):
     from lambda_tasks.settings import LambdaTasksSettings
 
     settings.LAMBDA_TASKS_QUEUES = {
-        "high_memory": "https://sqs.us-east-1.amazonaws.com/000/high"
+        "high_memory": {"queue_url": "https://sqs.us-east-1.amazonaws.com/000/high"}
     }
     s = LambdaTasksSettings()
     with pytest.raises(ImproperlyConfigured):
@@ -56,15 +58,22 @@ def test_soft_greater_than_hard_does_not_raise_in_settings(settings):
 
 
 def test_queues_with_default_key(settings):
-    from lambda_tasks.settings import LambdaTasksSettings
+    from lambda_tasks.settings import LambdaTasksSettings, SQSQueueConfig
 
     queues = {
-        "default": DEFAULT_URL,
-        "high_memory": "https://sqs.us-east-1.amazonaws.com/000/high",
+        "default": DEFAULT_QUEUE,
+        "high_memory": {"queue_url": "https://sqs.us-east-1.amazonaws.com/000/high"},
     }
     settings.LAMBDA_TASKS_QUEUES = queues
     s = LambdaTasksSettings()
-    assert s.QUEUES == queues
+    parsed = s.QUEUES
+    assert isinstance(parsed["default"], SQSQueueConfig)
+    assert parsed["default"].queue_url == DEFAULT_QUEUE["queue_url"]
+    assert isinstance(parsed["high_memory"], SQSQueueConfig)
+    assert (
+        parsed["high_memory"].queue_url
+        == "https://sqs.us-east-1.amazonaws.com/000/high"
+    )
 
 
 def test_default_soft_timeout_default_value(settings):
@@ -159,3 +168,98 @@ def test_singleton_cache_reads_configured_value(settings):
     settings.LAMBDA_TASKS_SINGLETON_CACHE = "redis_locks"
     conf = LambdaTasksSettings()
     assert conf.SINGLETON_CACHE == "redis_locks"
+
+
+# ---------------------------------------------------------------------------
+# Queue config format validation
+# ---------------------------------------------------------------------------
+
+
+def test_queue_value_not_dict_raises(settings):
+    from lambda_tasks.settings import LambdaTasksSettings
+
+    settings.LAMBDA_TASKS_QUEUES = {"default": "not-a-dict"}
+    conf = LambdaTasksSettings()
+    with pytest.raises(ImproperlyConfigured, match="must be a dict"):
+        _ = conf.QUEUES
+
+
+def test_queue_value_with_both_sqs_and_batch_keys_raises(settings):
+    from lambda_tasks.settings import LambdaTasksSettings
+
+    settings.LAMBDA_TASKS_QUEUES = {
+        "default": {
+            "queue_url": "https://sqs.example.com/q",
+            "job_queue_arn": "arn:...",
+            "job_definition_arn": "arn:...",
+        }
+    }
+    conf = LambdaTasksSettings()
+    with pytest.raises(ImproperlyConfigured, match="must contain either"):
+        _ = conf.QUEUES
+
+
+def test_queue_value_with_neither_pattern_raises(settings):
+    from lambda_tasks.settings import LambdaTasksSettings
+
+    settings.LAMBDA_TASKS_QUEUES = {"default": {"something_else": "value"}}
+    conf = LambdaTasksSettings()
+    with pytest.raises(ImproperlyConfigured, match="must contain either"):
+        _ = conf.QUEUES
+
+
+def test_default_queue_must_be_sqs(settings):
+    from lambda_tasks.settings import LambdaTasksSettings
+
+    settings.LAMBDA_TASKS_QUEUES = {
+        "default": {
+            "job_queue_arn": "arn:aws:batch:eu-west-1:123456789:job-queue/q",
+            "job_definition_arn": "arn:aws:batch:eu-west-1:123456789:job-definition/d:1",
+        }
+    }
+    conf = LambdaTasksSettings()
+    with pytest.raises(ImproperlyConfigured, match="must be an SQS queue"):
+        _ = conf.QUEUES
+
+
+def test_batch_queue_accepted(settings):
+    from lambda_tasks.settings import BatchQueueConfig, LambdaTasksSettings
+
+    settings.LAMBDA_TASKS_QUEUES = {
+        "default": DEFAULT_QUEUE,
+        "heavy": {
+            "job_queue_arn": "arn:aws:batch:eu-west-1:123456789:job-queue/q",
+            "job_definition_arn": "arn:aws:batch:eu-west-1:123456789:job-definition/d:1",
+        },
+    }
+    conf = LambdaTasksSettings()
+    heavy = conf.QUEUES["heavy"]
+    assert isinstance(heavy, BatchQueueConfig)
+    assert heavy.job_queue_arn == "arn:aws:batch:eu-west-1:123456789:job-queue/q"
+
+
+# ---------------------------------------------------------------------------
+# queue_max_timeout
+# ---------------------------------------------------------------------------
+
+
+def test_queue_max_timeout_sqs(settings):
+    from lambda_tasks.settings import MAX_TIMEOUT, LambdaTasksSettings
+
+    settings.LAMBDA_TASKS_QUEUES = QUEUES
+    conf = LambdaTasksSettings()
+    assert conf.queue_max_timeout(queue="default") == MAX_TIMEOUT
+
+
+def test_queue_max_timeout_batch(settings):
+    from lambda_tasks.settings import MAX_BATCH_TIMEOUT, LambdaTasksSettings
+
+    settings.LAMBDA_TASKS_QUEUES = {
+        "default": DEFAULT_QUEUE,
+        "heavy": {
+            "job_queue_arn": "arn:aws:batch:eu-west-1:123456789:job-queue/q",
+            "job_definition_arn": "arn:aws:batch:eu-west-1:123456789:job-definition/d:1",
+        },
+    }
+    conf = LambdaTasksSettings()
+    assert conf.queue_max_timeout(queue="heavy") == MAX_BATCH_TIMEOUT

@@ -1,6 +1,6 @@
 # Django Lambda Tasks
 
-A Django library for offloading work to AWS Lambda outside of the request-response cycle. Tasks are defined with a decorator, enqueued to SQS on transaction commit, and executed by a Lambda handler that AWS invokes with SQS message batches. Task results, status, and metadata are persisted in the Django database.
+A Django library for offloading work to AWS Lambda or AWS Batch outside of the request-response cycle. Tasks are defined with a decorator, enqueued to SQS on transaction commit, and executed by a Lambda handler or Batch container. Task results, status, and metadata are persisted in the Django database.
 
 > **Platform note:** Unix-based systems only (Linux, macOS). Timeout enforcement relies on `SIGALRM`.
 
@@ -74,7 +74,7 @@ See [AWS Lambda and SQS setup](#aws-lambda-and-sqs-setup) for queue and Lambda c
 
 ## Example app
 
-A runnable Django project is included in the [`example/`](example/) directory. It uses `LAMBDA_TASKS_EAGER = True` so no AWS infrastructure is needed.
+A runnable Django project is included in the [`example/`](example/) directory. It uses `LAMBDA_TASKS_LOCAL_WORKERS = 2` so no AWS infrastructure is needed.
 
 ```bash
 cd example
@@ -97,16 +97,25 @@ All settings are read from your Django settings module and prefixed with `LAMBDA
 
 | Setting | Type | Description |
 |---|---|---|
-| `LAMBDA_TASKS_QUEUES` | `dict[str, str]` | Map of queue name → SQS queue URL. Must include a `"default"` key. |
+| `LAMBDA_TASKS_QUEUES` | `dict[str, dict]` | Map of queue name → queue configuration. Must include a `"default"` key. The `"default"` queue must be an SQS queue. |
+
+Each queue value is a dict. The queue type is determined by the keys present:
+
+- **SQS queue:** `{"queue_url": "https://sqs.../queue-name"}` — tasks execute on Lambda (max timeout 900s)
+- **Batch queue:** `{"job_queue_arn": "arn:...", "job_definition_arn": "arn:..."}` — tasks execute on AWS Batch (max timeout 3600s)
 
 ```python
 LAMBDA_TASKS_QUEUES = {
-    "default": "https://sqs.us-east-1.amazonaws.com/123456789/default",
-    "high_memory": "https://sqs.us-east-1.amazonaws.com/123456789/high-memory",
+    "default": {"queue_url": "https://sqs.us-east-1.amazonaws.com/123456789/default"},
+    "high_memory": {"queue_url": "https://sqs.us-east-1.amazonaws.com/123456789/high-memory"},
+    "heavy": {
+        "job_queue_arn": "arn:aws:batch:eu-west-1:123456789:job-queue/my-queue",
+        "job_definition_arn": "arn:aws:batch:eu-west-1:123456789:job-definition/my-def:1",
+    },
 }
 ```
 
-`LAMBDA_TASKS_QUEUES` must be set and must include a `"default"` key, otherwise `ImproperlyConfigured` is raised on first use.
+`LAMBDA_TASKS_QUEUES` must be set and must include a `"default"` key, otherwise `ImproperlyConfigured` is raised on first use. The `"default"` queue must be an SQS queue.
 
 ### Timeout settings
 
@@ -115,7 +124,7 @@ LAMBDA_TASKS_QUEUES = {
 | `LAMBDA_TASKS_DEFAULT_SOFT_TIMEOUT` | `int` | `270` | Seconds before `SoftTimeLimitExceeded` is raised inside the task. |
 | `LAMBDA_TASKS_DEFAULT_HARD_TIMEOUT` | `int` | `300` | Seconds before the task is forcibly terminated. |
 
-Both values must be between `1` and `900` seconds (the AWS Lambda maximum runtime is 15 minutes). `soft_timeout` must always be strictly less than `hard_timeout`.
+Both values must be greater than zero and `soft_timeout` must always be strictly less than `hard_timeout`. The maximum allowed value depends on the queue type: 900 seconds for SQS queues (Lambda's 15-minute limit), 3600 seconds for Batch queues (1 hour). Upper bound validation happens at execution time based on the task's queue.
 
 ```python
 LAMBDA_TASKS_DEFAULT_SOFT_TIMEOUT = 240
@@ -205,9 +214,9 @@ def my_task(*, arg: str) -> None:
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `soft_timeout` | `int \| None` | `None` (uses global default) | Per-task soft timeout in seconds (max 900). |
-| `hard_timeout` | `int \| None` | `None` (uses global default) | Per-task hard timeout in seconds (max 900). |
-| `queue` | `str` | `"default"` | Named queue to route this task to. |
+| `soft_timeout` | `int \| None` | `None` (uses global default) | Per-task soft timeout in seconds. Max depends on queue type (900 for SQS, 3600 for Batch). |
+| `hard_timeout` | `int \| None` | `None` (uses global default) | Per-task hard timeout in seconds. Max depends on queue type (900 for SQS, 3600 for Batch). |
+| `queue` | `str` | `"default"` | Named queue to route this task to. Determines both execution backend and timeout limits. |
 | `retry_on` | `tuple[type[BaseException], ...]` | `()` | Exception types that trigger an automatic retry (see [Automatic retries](#automatic-retries)). |
 | `retry_delay` | `int` | `0` | Base delay in seconds when enqueuing a retry. Jitter (1–5s) is always added; result capped at 900. Requires `retry_on` to be non-empty. |
 | `singleton` | `bool` | `False` | Prevent concurrent execution via a Redis lock (see [Singleton tasks](#singleton-tasks)). |
@@ -286,25 +295,45 @@ Timeout resolution order (first non-`None` value wins):
 1. Per-task decorator default (`soft_timeout` / `hard_timeout` on `@lambda_task`)
 2. Global settings (`LAMBDA_TASKS_DEFAULT_SOFT_TIMEOUT` / `LAMBDA_TASKS_DEFAULT_HARD_TIMEOUT`)
 
+The maximum allowed timeout is determined by the queue type at execution time: 900 seconds for SQS queues, 3600 seconds for Batch queues.
+
 ---
 
 ## Named queues
 
-Route tasks to queues backed by Lambda functions with different hardware profiles (e.g. more memory or CPU):
+Route tasks to different execution backends by assigning them to named queues:
 
 ```python
 # settings.py
 LAMBDA_TASKS_QUEUES = {
-    "default": "https://sqs.us-east-1.amazonaws.com/123456789/default",
-    "high_memory": "https://sqs.us-east-1.amazonaws.com/123456789/high-memory",
+    "default": {"queue_url": "https://sqs.us-east-1.amazonaws.com/123456789/default"},
+    "high_memory": {"queue_url": "https://sqs.us-east-1.amazonaws.com/123456789/high-memory"},
+    "heavy": {
+        "job_queue_arn": "arn:aws:batch:eu-west-1:123456789:job-queue/my-queue",
+        "job_definition_arn": "arn:aws:batch:eu-west-1:123456789:job-definition/my-def:1",
+    },
 }
 ```
 
 ```python
+# Runs on Lambda with more memory
 @lambda_task(queue="high_memory")
-def process_large_file(*, file_id: int) -> None:
+def process_images(*, batch_id: int) -> None:
+    ...
+
+# Runs on AWS Batch (up to 1 hour, large disk)
+@lambda_task(queue="heavy", soft_timeout=1800, hard_timeout=3500)
+def process_large_file(*, file_id: int) -> str:
     ...
 ```
+
+Tasks routed to a Batch queue are automatically submitted to AWS Batch via the built-in `submit_batch_job` task. The flow is:
+
+1. `execute_on_commit()` enqueues a message to the default SQS queue
+2. The Lambda handler picks up the message and runs `submit_batch_job`
+3. `submit_batch_job` calls `batch.submit_job()` with the task message as a `LAMBDA_TASKS_MESSAGE` environment variable override
+4. The Batch container runs `python -m lambda_tasks.handler`, which reads the env var, performs cold-start init, and calls `execute_immediately()`
+5. The task runs with full timeout enforcement (`SIGALRM`), retry support, and `TaskRecord` tracking
 
 ---
 
@@ -441,10 +470,11 @@ Each task runs inside a `django.db.transaction.atomic` block. If the task raises
 |---|---|---|
 | Task function has positional parameters | `TypeError` | At decoration time |
 | `soft_timeout >= hard_timeout` | `ValueError` | At decoration time |
-| Timeout value exceeds 900 seconds | `ValueError` | At decoration time or settings load |
+| Timeout value exceeds queue max (900 or 3600) | `ValueError` | At execution time (timeout resolution) |
 | Unknown queue name | `ImproperlyConfigured` | At `.execute_on_commit()` |
 | `LAMBDA_TASKS_QUEUES` not set | `ImproperlyConfigured` | On first settings access |
 | `LAMBDA_TASKS_QUEUES` missing `"default"` | `ImproperlyConfigured` | On first settings access |
+| `"default"` queue is not SQS | `ImproperlyConfigured` | On first settings access |
 | SQS `send_message` failure | boto3 exception (propagated) | At `.execute_on_commit()` |
 
 ---
@@ -453,7 +483,7 @@ Each task runs inside a `django.db.transaction.atomic` block. If the task raises
 
 ### SQS queue configuration
 
-Each queue in `LAMBDA_TASKS_QUEUES` should be a standard SQS queue (not FIFO) with the following recommended settings:
+Each SQS queue in `LAMBDA_TASKS_QUEUES` should be a standard SQS queue (not FIFO) with the following recommended settings:
 
 - **Visibility timeout** — set this higher than your Lambda function's `hard_timeout`. If the Lambda times out before SQS receives a deletion confirmation, the message becomes visible again and will be redelivered.
 - **Dead letter queue (DLQ)** — configure a DLQ to capture messages that cannot be processed. Without one, messages that exhaust retries are silently deleted.
@@ -577,6 +607,39 @@ The following all raise `ValueError` at cold start, preventing the Lambda contai
 - Both `LAMBDA_TASKS_SECRET_FOO` and `FOO` are set — use one or the other
 - The named JSON key does not exist in the fetched secret
 - The secret value is not valid JSON
+
+---
+
+## AWS Batch setup
+
+For tasks that exceed Lambda's 15-minute timeout or 10GB ephemeral storage limit, route them to a Batch queue:
+
+```python
+@lambda_task(queue="heavy", soft_timeout=1800, hard_timeout=3500)
+def process_large_file(*, file_id: int) -> str:
+    # long-running work with large disk usage
+    return "done"
+```
+
+### Batch job definition setup
+
+Your Batch job definition should:
+- Use the same Docker image as your application
+- Set `DJANGO_SETTINGS_MODULE` as an environment variable
+- Configure secrets via the job definition's `secrets` field or via `LAMBDA_TASKS_ENVIRONMENT_SECRETS_MANAGER_ARN` / `LAMBDA_TASKS_SECRET_*` env vars (same mechanism as Lambda)
+- Set the default command to `["python", "-m", "lambda_tasks.handler"]`
+
+### Retries
+
+Batch tasks support `retry_on` — when a retryable exception is raised, the retry goes back through SQS → Lambda → `submit_batch_job` → new Batch job. The same `LAMBDA_TASKS_MAX_RETRIES` limit applies.
+
+### Container overrides limit
+
+The total `containerOverrides` payload (including JSON formatting) is limited to 8192 characters by AWS Batch. For typical task kwargs (IDs, short strings) this is not a concern.
+
+### Eager and local worker modes
+
+Tasks on Batch queues respect `LAMBDA_TASKS_EAGER` and `LAMBDA_TASKS_LOCAL_WORKERS` — in development, they run in-process or in the local process pool just like SQS-backed tasks, without requiring AWS infrastructure.
 
 ---
 

@@ -1,11 +1,7 @@
 """
-Decorator and wrapper for lambda tasks.
+Decorators and wrappers for lambda tasks.
 
-Provides LambdaTaskWrapper, which wraps a callable to expose:
-- direct __call__(**kwargs) — synchronous invocation
-- on_commit(**kwargs) — enqueue via django.db.transaction.on_commit
-
-Also provides the lambda_task decorator factory.
+Provides LambdaTaskWrapper and the @lambda_task decorator factory.
 """
 
 import functools
@@ -18,7 +14,10 @@ import pydantic
 from redis.exceptions import LockError
 
 from lambda_tasks.models import SQSLambdaTask, SQSLambdaTaskMessage
-from lambda_tasks.settings import MAX_DELAY, MAX_TIMEOUT, LambdaTasksSettings
+from lambda_tasks.settings import (
+    MAX_DELAY,
+    LambdaTasksSettings,
+)
 
 
 def _build_kwargs_model(func: types.FunctionType) -> type[pydantic.BaseModel]:
@@ -50,12 +49,8 @@ def _build_kwargs_model(func: types.FunctionType) -> type[pydantic.BaseModel]:
 
 
 class LambdaTaskWrapper:
-    """Wraps a function to be executed as a background task.
+    """Wraps a function to be executed as a background task via SQS."""
 
-    Preserves __name__, __doc__, and __wrapped__ via functools.wraps.
-    """
-
-    # Declared explicitly so type checkers can see them (set by functools.update_wrapper)
     __wrapped__: Callable[..., Any]
     __name__: str
     __doc__: str | None
@@ -94,16 +89,10 @@ class LambdaTaskWrapper:
     def resolved_timeouts(self) -> tuple[int, int]:
         """Return (soft_timeout, hard_timeout) resolved against settings defaults.
 
-        Merges decorator-supplied values with settings defaults, then validates
-        the final pair.  Each resolved value must be greater than zero and at
-        most ``MAX_TIMEOUT`` (900), and ``soft_timeout`` must be strictly less
-        than ``hard_timeout``.  Result is cached after first access.
+        Each resolved value must be greater than zero and at most the queue's
+        max timeout, and ``soft_timeout`` must be strictly less than
+        ``hard_timeout``.
         """
-        try:
-            return self._resolved_timeouts_cache
-        except AttributeError:
-            pass
-
         conf = LambdaTasksSettings()
         soft = (
             self._soft_timeout
@@ -116,7 +105,8 @@ class LambdaTaskWrapper:
             else conf.DEFAULT_HARD_TIMEOUT
         )
 
-        # Validate settings-sourced values (decorator values are already checked at decoration time)
+        max_timeout = conf.queue_max_timeout(queue=self._queue)
+
         for name, value, source in (
             ("soft_timeout", soft, self._soft_timeout),
             ("hard_timeout", hard, self._hard_timeout),
@@ -125,20 +115,22 @@ class LambdaTaskWrapper:
                 raise ValueError(
                     f"{name} ({value}) from settings must be greater than zero."
                 )
-            if source is None and value > MAX_TIMEOUT:
+            if source is None and value > max_timeout:
                 raise ValueError(
-                    f"{name} ({value}) from settings exceeds the maximum allowed value of {MAX_TIMEOUT} seconds."
+                    f"{name} ({value}) from settings exceeds the maximum allowed value of {max_timeout} seconds."
+                )
+            if source is not None and value > max_timeout:
+                raise ValueError(
+                    f"{name} ({value}) exceeds the maximum allowed value of {max_timeout} seconds for queue '{self._queue}'."
                 )
 
-        # Cross-validate the resolved pair (decorator values may mix with settings defaults)
         if soft >= hard:
             raise ValueError(
                 f"Resolved soft_timeout ({soft}) must be strictly less than "
                 f"hard_timeout ({hard}) for task '{self.__name__}'."
             )
 
-        self._resolved_timeouts_cache: tuple[int, int] = (soft, hard)
-        return self._resolved_timeouts_cache
+        return (soft, hard)
 
     def __call__(self, **kwargs: Any) -> Any:
         """Directly invoke the wrapped function."""
@@ -146,20 +138,11 @@ class LambdaTaskWrapper:
         return self._func(**kwargs)
 
     def _build_task(self, *, kwargs: dict[str, Any]) -> SQSLambdaTask:
-        """Pop overrides, validate kwargs, and build a SQSLambdaTask.
-
-        Mutates *kwargs* in-place (pops ``_n_retries``, ``_delay``).
-        Returns ``SQSLambdaTask``.
-
-        Raises:
-            pydantic.ValidationError: if the remaining kwargs fail type validation.
-            ValueError: if ``_delay`` is outside the allowed range [0, 900].
-        """
+        """Pop overrides, validate kwargs, and build an SQSLambdaTask."""
         n_retries = kwargs.pop("_n_retries", 0)
         delay = kwargs.pop("_delay", 0)
 
         self._validate_delay(delay=delay)
-
         self._kwargs_model.model_validate(kwargs)
 
         message = SQSLambdaTaskMessage(
@@ -175,13 +158,7 @@ class LambdaTaskWrapper:
         )
 
     def serialize(self, **kwargs: Any) -> dict:
-        """Serialize this task invocation to a JSON-compatible dict for deferred enqueuing.
-
-        Returns a dict matching SQSLambdaTaskMessage schema
-
-        Raises:
-            pydantic.ValidationError: if kwargs fail the task's declared type annotations.
-        """
+        """Serialize this task invocation to a JSON-compatible dict."""
         task = self._build_task(kwargs=kwargs)
         return task.model_dump(mode="json")
 
@@ -226,12 +203,12 @@ class LambdaTaskWrapper:
 
     @property
     def retry_delay(self) -> int:
-        """Delay in seconds used when enqueuing a retry. 0 means use jitter."""
+        """Delay in seconds used when enqueuing a retry."""
         return self._retry_delay
 
     @property
     def queue(self) -> str:
-        """The SQS queue name this task is routed to."""
+        """The queue name this task is routed to."""
         return self._queue
 
     @property
@@ -287,22 +264,13 @@ class LambdaTaskWrapper:
     def _validate_timeouts(
         *, soft_timeout: int | None, hard_timeout: int | None
     ) -> None:
-        """Raise ValueError if any timeout is not in (0, 900] or soft_timeout >= hard_timeout.
-
-        Each timeout, when supplied, must be greater than zero and at most
-        ``MAX_TIMEOUT`` (900).  When both are supplied, ``soft_timeout`` must
-        be strictly less than ``hard_timeout``.
-        """
+        """Raise ValueError if any timeout is invalid (only checks > 0 and soft < hard)."""
         for name, value in (
             ("soft_timeout", soft_timeout),
             ("hard_timeout", hard_timeout),
         ):
             if value is not None and value <= 0:
                 raise ValueError(f"{name} ({value}) must be greater than zero.")
-            if value is not None and value > MAX_TIMEOUT:
-                raise ValueError(
-                    f"{name} ({value}) exceeds the maximum allowed value of {MAX_TIMEOUT} seconds."
-                )
 
         if soft_timeout is not None and hard_timeout is not None:
             if soft_timeout >= hard_timeout:
@@ -379,7 +347,7 @@ def lambda_task(
     """
 
     def _decorate(f: types.FunctionType) -> LambdaTaskWrapper:
-        wrapper = LambdaTaskWrapper(
+        return LambdaTaskWrapper(
             f,
             retry_delay=retry_delay,
             soft_timeout=soft_timeout,
@@ -389,11 +357,8 @@ def lambda_task(
             singleton=singleton,
             retry_singleton=retry_singleton,
         )
-        return wrapper
 
     if func is not None:
-        # Called as @lambda_task (no parentheses)
         return _decorate(func)
 
-    # Called as @lambda_task(...) — return the decorator
     return _decorate

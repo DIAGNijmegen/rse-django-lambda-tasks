@@ -212,6 +212,7 @@ def test_property_14_timeout_resolution_precedence(
         mock_conf = MagicMock()
         mock_conf.DEFAULT_SOFT_TIMEOUT = glob_soft
         mock_conf.DEFAULT_HARD_TIMEOUT = glob_hard
+        mock_conf.queue_max_timeout.return_value = 900
         mock_settings_cls.return_value = mock_conf
         msg.execute_immediately(message_id=str(uuid.uuid4()))
 
