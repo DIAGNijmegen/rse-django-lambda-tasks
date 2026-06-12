@@ -265,6 +265,7 @@ class SQSLambdaTask(BaseModel):
             submit_batch_job.execute_on_commit(
                 message_json=self.message.model_dump_json(),
                 batch_queue=self.queue,
+                _delay=self.delay,
             )
         else:
             try:

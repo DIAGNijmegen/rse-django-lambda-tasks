@@ -130,6 +130,24 @@ class TestSQSLambdaTaskBatchBackend:
         mock_eoc.assert_called_once_with(
             message_json=message.model_dump_json(),
             batch_queue="default",
+            _delay=0,
+        )
+
+    def test_batch_backend_passes_delay(self, settings):
+        settings.LAMBDA_TASKS_QUEUES = QUEUES
+        settings.LAMBDA_TASKS_BATCH_QUEUES = BATCH_QUEUES
+
+        task_name = f"{_batch_task_succeeds.__module__}.{_batch_task_succeeds.__wrapped__.__qualname__}"
+        message = SQSLambdaTaskMessage(task_name=task_name, kwargs={"value": 1})
+        task = SQSLambdaTask(message=message, delay=120, queue="default")
+
+        with patch("lambda_tasks.tasks.submit_batch_job.execute_on_commit") as mock_eoc:
+            task._execute()
+
+        mock_eoc.assert_called_once_with(
+            message_json=message.model_dump_json(),
+            batch_queue="default",
+            _delay=120,
         )
 
     @pytest.mark.django_db
