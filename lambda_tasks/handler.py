@@ -12,12 +12,13 @@ timeouts. The sequence is guarded by a module-level sentinel so subsequent
 warm invocations skip it.
 """
 
+import json
 import logging
 import os
 import resource
 import sys
+import urllib.request
 import uuid
-from pathlib import Path
 
 import django
 from django.apps import apps
@@ -32,37 +33,31 @@ _cold_start_done: bool = False
 
 _MEMORY_RESERVED_MB = 128
 _MEMORY_MINIMUM_LIMIT_MB = 64
-_CGROUP_V2_MEMORY_MAX_PATH = Path("/sys/fs/cgroup/memory.max")
-_CGROUP_V1_MEMORY_LIMIT_PATH = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")
 
 
 def _get_memory_mb() -> int | None:
-    """Get container memory limit from Lambda env var or cgroup."""
+    """Get container memory limit from Lambda env var or ECS metadata endpoint."""
     memory_mb_str = os.environ.get("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
     if memory_mb_str is not None:
         return int(memory_mb_str)
 
-    try:
-        value = _CGROUP_V2_MEMORY_MAX_PATH.read_text().strip()
-        if value == "max":
+    metadata_uri = os.environ.get("ECS_CONTAINER_METADATA_URI_V4")
+    if metadata_uri is not None:
+        try:
+            with urllib.request.urlopen(f"{metadata_uri}/task", timeout=2) as response:
+                data = json.loads(response.read())
+            return int(data["Limits"]["Memory"])
+        except Exception:
             return None
-        else:
-            return int(value) // (1024 * 1024)
-    except (FileNotFoundError, ValueError):
-        pass
 
-    try:
-        value = _CGROUP_V1_MEMORY_LIMIT_PATH.read_text().strip()
-        return int(value) // (1024 * 1024)
-    except (FileNotFoundError, ValueError):
-        return None
+    return None
 
 
 def _set_memory_limit() -> None:
     """Set RLIMIT_AS from the container memory limit.
 
     On Lambda, reads AWS_LAMBDA_FUNCTION_MEMORY_SIZE. On Fargate/Batch,
-    reads the cgroup v2 memory limit. This causes Python to raise
+    queries the ECS task metadata endpoint. This causes Python to raise
     MemoryError on excessive allocation instead of being killed by the
     OOM killer.
 

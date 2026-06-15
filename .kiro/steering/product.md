@@ -151,7 +151,7 @@ class SQSLambdaTaskMessage(BaseModel):
 - A module-level `_cold_start_done` sentinel ensures the sequence runs only once; subsequent warm invocations skip it
 - Both loaders run unconditionally (outside the `DJANGO_SETTINGS_MODULE` check) — the environment secret may provide that var, and individual secrets may depend on environment-loaded vars
 - A temporary `StreamHandler` is attached to the `lambda_tasks` logger for the duration of the loaders so their log output is visible before Django's `LOGGING` dictConfig has run; it is removed immediately after so that Django's configuration is the sole authority on logging from that point on
-- `resource.setrlimit(RLIMIT_DATA)` is set from `AWS_LAMBDA_FUNCTION_MEMORY_SIZE` so that excessive allocation raises `MemoryError` instead of triggering the OOM killer
+- `resource.setrlimit(RLIMIT_AS)` is set from `AWS_LAMBDA_FUNCTION_MEMORY_SIZE` (Lambda) or the ECS task metadata endpoint (Fargate/Batch) so that excessive allocation raises `MemoryError` instead of triggering the OOM killer
 
 `main()` in `handler.py` — AWS Batch container entry point (`python -m lambda_tasks.handler`):
 - Reads `LAMBDA_TASKS_MESSAGE` env var (the serialized task JSON, set by `submit_batch_job` via container overrides)
