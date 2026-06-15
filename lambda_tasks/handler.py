@@ -32,19 +32,27 @@ _cold_start_done: bool = False
 
 _MEMORY_RESERVED_MB = 128
 _MEMORY_MINIMUM_LIMIT_MB = 64
-_CGROUP_MEMORY_MAX_PATH = Path("/sys/fs/cgroup/memory.max")
+_CGROUP_V2_MEMORY_MAX_PATH = Path("/sys/fs/cgroup/memory.max")
+_CGROUP_V1_MEMORY_LIMIT_PATH = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")
 
 
 def _get_memory_mb() -> int | None:
-    """Get container memory limit from Lambda env var or cgroup v2."""
+    """Get container memory limit from Lambda env var or cgroup."""
     memory_mb_str = os.environ.get("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
     if memory_mb_str is not None:
         return int(memory_mb_str)
 
     try:
-        value = _CGROUP_MEMORY_MAX_PATH.read_text().strip()
+        value = _CGROUP_V2_MEMORY_MAX_PATH.read_text().strip()
         if value == "max":
             return None
+        else:
+            return int(value) // (1024 * 1024)
+    except (FileNotFoundError, ValueError):
+        pass
+
+    try:
+        value = _CGROUP_V1_MEMORY_LIMIT_PATH.read_text().strip()
         return int(value) // (1024 * 1024)
     except (FileNotFoundError, ValueError):
         return None
