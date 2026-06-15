@@ -2,6 +2,7 @@
 
 import atexit
 import logging
+import multiprocessing
 import signal
 import threading
 import uuid
@@ -23,9 +24,10 @@ def _pool_initializer() -> None:
     atexit as a fallback). This prevents workers from being killed
     mid-operation and leaking semaphores.
 
-    Closes all inherited database connections before setting up Django.
-    On Linux (fork-based spawning), child processes inherit copies of the
-    parent's DB connections which are in an inconsistent state.
+    Closes all database connections before setting up Django. With the
+    forkserver context, workers don't inherit the parent's connections,
+    but AppConfig.ready() hooks may open connections during django.setup()
+    that should be closed before task execution begins.
 
     Then sets up Django for task execution.
     """
@@ -34,9 +36,9 @@ def _pool_initializer() -> None:
     import django
     from django.db import connections
 
-    connections.close_all()
-
     django.setup()
+
+    connections.close_all()
 
 
 def _shutdown_pool() -> None:
@@ -118,12 +120,22 @@ def _install_shutdown_handlers() -> None:
 
 
 def get_pool() -> ProcessPoolExecutor:
-    """Return the shared ProcessPoolExecutor, creating it on first call."""
+    """Return the shared ProcessPoolExecutor, creating it on first call.
+
+    Uses the "forkserver" multiprocessing context so that worker processes
+    are forked from a clean server process rather than from the Django parent.
+    This prevents workers from inheriting the parent's open database
+    connections (and other file descriptors), which would otherwise cause
+    "server closed the connection unexpectedly" errors in containerized
+    environments where close() in the child tears down the shared socket.
+    """
     global _pool
     if _pool is None:
         conf = LambdaTasksSettings()
+        mp_context = multiprocessing.get_context("forkserver")
         _pool = ProcessPoolExecutor(
             max_workers=conf.LOCAL_WORKERS,
+            mp_context=mp_context,
             initializer=_pool_initializer,
         )
         atexit.register(_shutdown_pool)

@@ -189,6 +189,25 @@ class TestGetPool:
 
         assert lambda_tasks.local_executor._pool is pool
 
+    @pytest.mark.usefixtures("_reset_pool")
+    def test_get_pool_uses_forkserver_context(self, settings):
+        """get_pool() uses the forkserver multiprocessing context.
+
+        This prevents workers from inheriting the parent's open database
+        connections, which would cause connection errors in containerized
+        environments.
+        """
+        import lambda_tasks.local_executor
+
+        settings.LAMBDA_TASKS_LOCAL_WORKERS = 2
+        settings.LAMBDA_TASKS_EAGER = False
+
+        pool = lambda_tasks.local_executor.get_pool()
+
+        # ProcessPoolExecutor stores the context; forkserver processes
+        # use the ForkServerProcess type
+        assert pool._mp_context.get_start_method() == "forkserver"
+
 
 # ---------------------------------------------------------------------------
 # Property-based tests: get_pool() (Requirement 2)
