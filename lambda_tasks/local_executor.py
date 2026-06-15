@@ -23,11 +23,18 @@ def _pool_initializer() -> None:
     atexit as a fallback). This prevents workers from being killed
     mid-operation and leaking semaphores.
 
+    Closes all inherited database connections before setting up Django.
+    On Linux (fork-based spawning), child processes inherit copies of the
+    parent's DB connections which are in an inconsistent state.
+
     Then sets up Django for task execution.
     """
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     import django
+    from django.db import connections
+
+    connections.close_all()
 
     django.setup()
 
