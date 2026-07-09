@@ -108,3 +108,16 @@ class LambdaTasksSettings:
             )
         else:
             return value
+
+    @property
+    def NOOP_EXECUTION(self) -> bool:
+        value = bool(getattr(django_settings, "LAMBDA_TASKS_NOOP_EXECUTION", False))
+        if value and self.EAGER:
+            raise ImproperlyConfigured(
+                "LAMBDA_TASKS_NOOP_EXECUTION and LAMBDA_TASKS_EAGER are mutually exclusive."
+            )
+        if value and int(getattr(django_settings, "LAMBDA_TASKS_LOCAL_WORKERS", 0)) > 0:
+            raise ImproperlyConfigured(
+                "LAMBDA_TASKS_NOOP_EXECUTION and LAMBDA_TASKS_LOCAL_WORKERS are mutually exclusive."
+            )
+        return value

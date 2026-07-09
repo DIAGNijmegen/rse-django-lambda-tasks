@@ -181,9 +181,10 @@ LAMBDA_TASKS_LOCAL_WORKERS = 4
 Async local mode bridges the gap between eager mode and full SQS/Lambda deployment. Tasks execute in background worker processes with true parallelism and full timeout enforcement via `SIGALRM`, without requiring AWS infrastructure.
 
 The execution mode hierarchy is:
-1. **Eager** (`LAMBDA_TASKS_EAGER=True`) — synchronous, in-process, no timeouts
-2. **Async local** (`LAMBDA_TASKS_LOCAL_WORKERS > 0`) — async, separate processes, timeouts enforced
-3. **SQS** (default) — async, Lambda workers, timeouts enforced
+1. **Noop** (`LAMBDA_TASKS_NOOP_EXECUTION=True`) — tasks are dropped with a warning log
+2. **Eager** (`LAMBDA_TASKS_EAGER=True`) — synchronous, in-process, no timeouts
+3. **Async local** (`LAMBDA_TASKS_LOCAL_WORKERS > 0`) — async, separate processes, timeouts enforced
+4. **SQS** (default) — async, Lambda workers, timeouts enforced
 
 Key characteristics:
 - `LAMBDA_TASKS_LOCAL_WORKERS` and `LAMBDA_TASKS_EAGER` are mutually exclusive — setting both raises `ImproperlyConfigured`
@@ -193,6 +194,35 @@ Key characteristics:
 - Worker failures are isolated from the Django server process — a crashing task does not bring down the dev server
 - `transaction.on_commit` is respected — tasks only submit after the transaction commits
 - Timeouts (`SIGALRM`) are fully enforced because workers are separate OS processes
+
+---
+
+### Noop execution (testing)
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `LAMBDA_TASKS_NOOP_EXECUTION` | `bool` | `False` | When `True`, all tasks are silently dropped. A warning is logged with the task name, kwargs, and queue. |
+
+```python
+# settings/test.py
+LAMBDA_TASKS_NOOP_EXECUTION = True
+```
+
+Noop mode is useful for test suites where task execution is irrelevant and you want to avoid mocking SQS or running tasks at all. When a task is dispatched via `execute_on_commit()`, it logs a warning and returns immediately — no SQS message is sent, no task is executed, no `TaskRecord` is created.
+
+`LAMBDA_TASKS_NOOP_EXECUTION` is mutually exclusive with both `LAMBDA_TASKS_EAGER` and `LAMBDA_TASKS_LOCAL_WORKERS` — setting it alongside either raises `ImproperlyConfigured`.
+
+### Deployment checks
+
+A Django deployment check (runs with `manage.py check --deploy`) warns if any non-production execution mode is enabled:
+
+| Check ID | Condition | Message |
+|---|---|---|
+| `lambda_tasks.W001` | `LAMBDA_TASKS_NOOP_EXECUTION = True` | Tasks will be silently dropped |
+| `lambda_tasks.W002` | `LAMBDA_TASKS_EAGER = True` | Tasks will run synchronously in-process |
+| `lambda_tasks.W003` | `LAMBDA_TASKS_LOCAL_WORKERS > 0` | Tasks will run in a local process pool |
+
+Add `manage.py check --deploy` to your CI pipeline to catch these misconfigurations before they reach production.
 
 ---
 

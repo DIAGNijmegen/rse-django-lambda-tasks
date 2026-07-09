@@ -12,6 +12,7 @@ django-lambda-tasks/
 │   ├── __init__.py
 │   ├── admin.py                # Django admin for TaskRecord
 │   ├── apps.py                 # Django AppConfig
+│   ├── checks.py               # Django deployment checks (noop, eager, local_workers)
 │   ├── decorators.py           # LambdaTaskWrapper, @lambda_task
 │   ├── handler.py              # AWS Lambda entry point + AWS Batch container entry point (main)
 │   ├── logging.py              # task_logger — invocation-scoped LoggerAdapter
@@ -48,7 +49,8 @@ django-lambda-tasks/
 - `logging.py` — `task_logger` singleton; `message_id` set/cleared around each task execution
 - `settings.py` — constants (`MAX_DELAY`, `MAX_TIMEOUT`, `MAX_BATCH_TIMEOUT`); `_is_sqs_queue()` and `_is_batch_queue()` helpers; `LambdaTasksSettings` instantiated fresh per use (reads live Django settings); `queue_max_timeout()` method returns 900 or 3600 based on queue type
 - `admin.py` — Django admin registration for `TaskRecord`
-- `apps.py` — Django `AppConfig`; `ready()` installs the local-executor shutdown signal handlers when `LOCAL_WORKERS > 0`
+- `apps.py` — Django `AppConfig`; `ready()` imports `checks` to register deployment checks and installs the local-executor shutdown signal handlers when `LOCAL_WORKERS > 0`
+- `checks.py` — Django deployment checks; `check_noop_not_in_production` warns if `NOOP_EXECUTION`, `EAGER`, or `LOCAL_WORKERS > 0` are set (runs with `manage.py check --deploy`)
 - `tasks.py` — built-in tasks; `cleanup_task_records` deletes old `TaskRecord` rows; `submit_batch_job` receives a serialized task message and submits it to AWS Batch via `batch.submit_job()`
 
 ## Conventions

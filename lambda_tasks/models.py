@@ -2,6 +2,7 @@
 
 import contextlib
 import datetime
+import logging
 import random
 import traceback
 import uuid
@@ -25,6 +26,8 @@ from lambda_tasks.settings import (
     SQSQueueConfig,
 )
 from lambda_tasks.timeouts import TimeoutContext
+
+logger = logging.getLogger("lambda_tasks")
 
 
 class MaxRetriesExceededError(Exception):
@@ -259,6 +262,13 @@ class SQSLambdaTask(BaseModel):
             Any boto3 exception: propagated directly to the caller.
         """
         conf = LambdaTasksSettings()
+
+        if conf.NOOP_EXECUTION:
+            logger.warning(
+                f"Task {self.message.task_name} dropped (noop execution mode): "
+                f"kwargs={self.message.kwargs!r}, queue={self.queue!r}"
+            )
+            return
 
         if conf.EAGER:
             self.message.execute_immediately(message_id=str(uuid.uuid4()))

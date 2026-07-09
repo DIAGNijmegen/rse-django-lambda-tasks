@@ -15,6 +15,7 @@ class LambdaTasksConfig(AppConfig):
         on Ctrl+C, before Django's autoreloader parent SIGKILLs this child. See
         ``local_executor._install_shutdown_handlers`` for the full rationale.
         """
+        import lambda_tasks.checks  # noqa: F401 — register deployment checks
         from lambda_tasks.local_executor import _install_shutdown_handlers
         from lambda_tasks.settings import LambdaTasksSettings
 

@@ -215,10 +215,24 @@ Statuses: `RUNNING`, `SUCCESS`, `FAILED`, `RETRYING`
 | `LAMBDA_TASKS_DEFAULT_HARD_TIMEOUT` | `300` | Hard timeout in seconds |
 | `LAMBDA_TASKS_EAGER` | `False` | Run tasks synchronously in-process (no SQS) |
 | `LAMBDA_TASKS_LOCAL_WORKERS` | `0` | Number of worker processes for async local execution (development only; mutually exclusive with `EAGER`) |
+| `LAMBDA_TASKS_NOOP_EXECUTION` | `False` | Drop all tasks silently (for local tests; mutually exclusive with `EAGER` and `LOCAL_WORKERS`) |
 | `LAMBDA_TASKS_MAX_RETRIES` | `2880` | Maximum retry attempts before `MaxRetriesExceededError` is raised (60 × 24 × 2) |
 | `LAMBDA_TASKS_SINGLETON_CACHE` | `"default"` | Django cache backend used for singleton task locks |
 
 `LAMBDA_TASKS_QUEUES` must be set and include a `"default"` key. The `"default"` queue must be an SQS queue. Both timeout values must be greater than zero and `soft_timeout` must always be strictly less than `hard_timeout`. The maximum allowed timeout depends on the queue type: 900 for SQS, 3600 for Batch.
+
+## Noop Execution Mode
+
+Set `LAMBDA_TASKS_NOOP_EXECUTION = True` to silently drop all tasks. Useful for local tests where task execution is irrelevant. When a task is dispatched, a warning is logged with the task name, kwargs, and queue, and execution returns immediately — no SQS message is sent, no task is executed.
+
+```python
+# settings/test.py
+LAMBDA_TASKS_NOOP_EXECUTION = True
+```
+
+`LAMBDA_TASKS_NOOP_EXECUTION` can only be set when `LAMBDA_TASKS_EAGER` is `False` and `LAMBDA_TASKS_LOCAL_WORKERS` is `0`. Setting it alongside either raises `ImproperlyConfigured`.
+
+A Django deployment check (`lambda_tasks.W001`) warns if this setting is enabled, ensuring it is not accidentally left on in production.
 
 ## Eager Mode
 
@@ -238,11 +252,14 @@ LAMBDA_TASKS_LOCAL_WORKERS = 4
 ```
 
 The execution mode hierarchy is:
-1. **Eager mode** (`LAMBDA_TASKS_EAGER=True`) — synchronous, in-process, no timeouts
-2. **Async local mode** (`LOCAL_WORKERS > 0`) — async, separate processes, timeouts enforced
-3. **SQS mode** (default) — async, Lambda workers, timeouts enforced
+1. **Noop mode** (`LAMBDA_TASKS_NOOP_EXECUTION=True`) — tasks are dropped with a warning log
+2. **Eager mode** (`LAMBDA_TASKS_EAGER=True`) — synchronous, in-process, no timeouts
+3. **Async local mode** (`LOCAL_WORKERS > 0`) — async, separate processes, timeouts enforced
+4. **SQS mode** (default) — async, Lambda workers, timeouts enforced
 
 `LAMBDA_TASKS_LOCAL_WORKERS` and `LAMBDA_TASKS_EAGER` are mutually exclusive — setting both raises `ImproperlyConfigured`. A negative value also raises `ImproperlyConfigured`.
+
+`LAMBDA_TASKS_NOOP_EXECUTION` is mutually exclusive with both `LAMBDA_TASKS_EAGER` and `LAMBDA_TASKS_LOCAL_WORKERS`.
 
 Key behaviours:
 - The process pool is created lazily on first task submission and reused for the server lifetime
@@ -266,6 +283,18 @@ Implementation lives in `lambda_tasks/local_executor.py`:
 Relying on `atexit` alone loses this race in applications with a heavy shutdown sequence (many `atexit` handlers, open DB connections), because `atexit` runs only after the full interpreter unwind — `SIGKILL` arrives first. To win the race, `LambdaTasksConfig.ready()` calls `_install_shutdown_handlers()` when `LOCAL_WORKERS > 0`. The handler shuts the pool down as its **first** action, then chains to the previously installed handler so normal shutdown behaviour (`KeyboardInterrupt`, autoreloader exit) is preserved. `atexit` registration remains as a fallback for non-signal exits. Handler installation is idempotent and only effective on the main thread (`signal.signal` raises off the main thread, in which case it is a no-op).
 
 `_shutdown_pool()` does **not** use `pool.shutdown(wait=True)`. `wait=True` blocks on joining the worker processes, and a worker that ran a heavy `django.setup()` is slow to exit — `concurrent.futures` does not unlink the pool's queue semaphores until the workers actually die, so the parent's near-instant `SIGKILL` still wins and the semaphores leak. Instead `_shutdown_pool()` **terminates the worker processes first** (a near-instant signal to children we own), then calls `pool.shutdown(wait=False, cancel_futures=True)`. With the workers already gone, the queue semaphores are unlinked in milliseconds — fast enough to beat the parent's `SIGKILL`.
+
+## Deployment Checks
+
+`lambda_tasks.checks` registers a Django deployment check (runs with `manage.py check --deploy`) that warns if any non-production execution mode is enabled:
+
+| ID | Condition | Message |
+|---|---|---|
+| `lambda_tasks.W001` | `LAMBDA_TASKS_NOOP_EXECUTION = True` | Tasks will be silently dropped |
+| `lambda_tasks.W002` | `LAMBDA_TASKS_EAGER = True` | Tasks will run synchronously in-process |
+| `lambda_tasks.W003` | `LAMBDA_TASKS_LOCAL_WORKERS > 0` | Tasks will run in a local process pool |
+
+The checks are registered via `AppConfig.ready()` and tagged with `deploy=True` so they only fire during `--deploy` checks.
 
 ## Logging
 
