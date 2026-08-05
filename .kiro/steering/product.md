@@ -143,6 +143,7 @@ class SQSLambdaTaskMessage(BaseModel):
 
 `handler(event, context)` in `handler.py`:
 - Processes each SQS record independently
+- Calls `django.db.close_old_connections()` before each record to close database connections that have become unusable between warm invocations (idle timeouts, RDS failovers, network interruptions)
 - Passes `record["messageId"]` as `message_id` to `execute_immediately()` — this becomes the `TaskRecord` primary key, enabling deduplication on redelivery
 - Returns `{"batchItemFailures": [...]}` for partial-batch failure reporting
 - Only pre-execution failures (malformed message, import error, misconfiguration) are reported as `batchItemFailures` — task logic failures are caught and recorded as `FAILED` TaskRecords without raising

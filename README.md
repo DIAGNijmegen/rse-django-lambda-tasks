@@ -535,6 +535,8 @@ lambda_tasks.handler.handler
 
 The handler performs cold-start initialisation on the first invocation (not at module import time) to avoid Lambda init-duration timeouts. The sequence is: temporary log handler attached → `resolve_environment()` → `resolve_secrets_into_env()` → log handler removed → conditional `django.setup()`. A module-level sentinel ensures this runs only once; subsequent warm invocations skip it entirely.
 
+Before processing each SQS record, the handler calls `django.db.close_old_connections()` to close any database connections that have become unusable between invocations. Lambda containers are reused across invocations (warm starts), but database connections may be closed server-side due to idle timeouts, RDS failovers, or network interruptions. Without this, the first database query in a task would fail with `OperationalError: the connection is closed`.
+
 Ensure the Lambda execution environment has `DJANGO_SETTINGS_MODULE` set and that all task modules are importable (i.e. your application code is on the Python path).
 
 | Environment Variable | Required | Description |

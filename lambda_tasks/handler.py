@@ -21,6 +21,7 @@ import urllib.request
 import uuid
 
 import django
+from django import db
 from django.apps import apps
 
 from lambda_tasks.environment_loader import resolve_environment
@@ -132,6 +133,7 @@ def handler(event: dict, context: object) -> dict:
 
     for record in event["Records"]:
         try:
+            db.close_old_connections()
             SQSLambdaTaskMessage.model_validate_json(
                 record["body"]
             ).execute_immediately(message_id=record["messageId"])

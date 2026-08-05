@@ -26,6 +26,14 @@ from hypothesis import strategies as st
 
 from lambda_tasks.handler import handler
 
+
+@pytest.fixture(autouse=True)
+def _patch_close_old_connections():
+    """Prevent close_old_connections from triggering the DB access guard in unit tests."""
+    with patch("lambda_tasks.handler.db.close_old_connections"):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Signature test
 # ---------------------------------------------------------------------------
@@ -457,3 +465,71 @@ class TestColdStartLogging:
 
         assert lambda_tasks_logger.handlers == []
         assert lambda_tasks_logger.level == logging.NOTSET
+
+
+# ---------------------------------------------------------------------------
+# Stale connection handling
+# ---------------------------------------------------------------------------
+
+
+class TestHandlerClosesOldConnections:
+    def test_close_old_connections_called_before_each_record(self):
+        """close_old_connections() is called before processing each SQS record."""
+        call_order = []
+
+        def _track_close():
+            call_order.append("close")
+
+        def _make_message(body: str):
+            msg = MagicMock()
+
+            def _execute(**kwargs):
+                call_order.append("execute")
+
+            msg.execute_immediately.side_effect = _execute
+            return msg
+
+        records = [
+            _make_record("msg-1", _valid_body()),
+            _make_record("msg-2", _valid_body()),
+        ]
+
+        with (
+            patch(
+                "lambda_tasks.handler.db.close_old_connections",
+                side_effect=_track_close,
+            ),
+            _patch_model_validate(_make_message),
+        ):
+            handler(event={"Records": records}, context=None)
+
+        assert call_order == ["close", "execute", "close", "execute"]
+
+    def test_close_old_connections_called_even_when_record_fails(self):
+        """close_old_connections() is called before each record, including ones that fail."""
+        close_count = 0
+
+        def _track_close():
+            nonlocal close_count
+            close_count += 1
+
+        def _make_message(body: str):
+            msg = MagicMock()
+            msg.execute_immediately.side_effect = RuntimeError("boom")
+            return msg
+
+        records = [
+            _make_record("msg-1", _valid_body()),
+            _make_record("msg-2", _valid_body()),
+        ]
+
+        with (
+            patch(
+                "lambda_tasks.handler.db.close_old_connections",
+                side_effect=_track_close,
+            ),
+            _patch_model_validate(_make_message),
+        ):
+            handler(event={"Records": records}, context=None)
+
+        assert close_count == 2
