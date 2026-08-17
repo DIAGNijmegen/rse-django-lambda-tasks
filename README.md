@@ -4,6 +4,8 @@ A Django library for offloading work to AWS Lambda or AWS Batch outside of the r
 
 > **Platform note:** Unix-based systems only (Linux, macOS). Timeout enforcement relies on `SIGALRM`.
 
+> **Database note:** PostgreSQL is required. The `TaskRecord` model uses PostgreSQL-specific features.
+
 ---
 
 ## Installation
