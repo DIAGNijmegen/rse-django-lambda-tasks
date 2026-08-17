@@ -1,12 +1,21 @@
 """Tests for lambda_tasks.batch_worker entry point."""
 
 import uuid
+from unittest.mock import patch
 
 import pytest
 
 from lambda_tasks.decorators import lambda_task
 from lambda_tasks.handler import main
 from lambda_tasks.models import SQSLambdaTaskMessage, TaskRecord
+
+
+@pytest.fixture(autouse=True)
+def _patch_close_old_connections():
+    """Prevent close_old_connections from closing the test DB connection."""
+    with patch("lambda_tasks.handler.db.close_old_connections"):
+        yield
+
 
 QUEUES = {
     "default": {"queue_url": "https://sqs.us-east-1.amazonaws.com/000000000000/default"}

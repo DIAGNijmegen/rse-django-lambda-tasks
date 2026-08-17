@@ -1096,7 +1096,14 @@ def test_property_4_retry_increments_n_retries(n_retries, exc_type_name):
 @pytest.mark.django_db(transaction=True)
 @given(
     x=st.integers(),
-    label=st.text(min_size=1, max_size=20),
+    label=st.text(
+        min_size=1,
+        max_size=20,
+        alphabet=st.characters(
+            blacklist_characters="\x00",
+            blacklist_categories=("Cs",),
+        ),
+    ),
 )
 @h_settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
 def test_property_5_matching_exc_enqueues_retry_same_kwargs(x, label):

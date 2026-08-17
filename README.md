@@ -4,6 +4,8 @@ A Django library for offloading work to AWS Lambda or AWS Batch outside of the r
 
 > **Platform note:** Unix-based systems only (Linux, macOS). Timeout enforcement relies on `SIGALRM`.
 
+> **Database note:** PostgreSQL is required. The `TaskRecord` model uses PostgreSQL-specific features.
+
 ---
 
 ## Installation
@@ -78,6 +80,7 @@ A runnable Django project is included in the [`example/`](example/) directory. I
 
 ```bash
 cd example
+docker compose up -d
 uv run python manage.py migrate
 uv run python manage.py createsuperuser
 uv run python manage.py runserver

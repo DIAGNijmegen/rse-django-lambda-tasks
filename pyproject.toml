@@ -30,6 +30,7 @@ dev = [
     "pytest-xdist",
     "pytest-cov",
     "ty",
+    "psycopg",
 ]
 
 [tool.ty.rules]
