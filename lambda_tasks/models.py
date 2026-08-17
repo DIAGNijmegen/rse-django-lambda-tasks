@@ -8,10 +8,12 @@ import traceback
 import uuid
 
 import boto3
+from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.core.cache import caches
 from django.core.exceptions import ImproperlyConfigured
 from django.db import models, transaction
 from django.db.models import Q
+from django.db.models.functions import Cast
 from django.utils.module_loading import import_string
 from django.utils.timezone import now
 from pydantic import BaseModel, ConfigDict, Field
@@ -74,6 +76,12 @@ class TaskRecord(models.Model):
             models.Index(fields=["task_name"]),
             models.Index(fields=["status"]),
             models.Index(fields=["-start_time"]),
+            GinIndex(
+                OpClass(
+                    Cast("kwargs", output_field=models.TextField()), name="gin_trgm_ops"
+                ),
+                name="taskrecord_kwargs_trgm",
+            ),
         ]
         constraints = [
             models.CheckConstraint(

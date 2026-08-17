@@ -1,7 +1,27 @@
 """Django deployment checks for lambda_tasks."""
 
 from django.conf import settings as django_settings
-from django.core.checks import Warning, register
+from django.core.checks import Error, Warning, register
+
+
+@register("lambda_tasks")
+def check_contrib_postgres_installed(
+    *, app_configs: object, **kwargs: object
+) -> list[Error]:
+    """Error if django.contrib.postgres is not in INSTALLED_APPS."""
+    errors: list[Error] = []
+
+    if "django.contrib.postgres" not in django_settings.INSTALLED_APPS:
+        errors.append(
+            Error(
+                "django.contrib.postgres is not in INSTALLED_APPS.",
+                hint="Add 'django.contrib.postgres' to INSTALLED_APPS. "
+                "It is required for PostgreSQL-specific indexes used by lambda_tasks.",
+                id="lambda_tasks.E001",
+            )
+        )
+
+    return errors
 
 
 @register("lambda_tasks", deploy=True)
