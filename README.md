@@ -78,6 +78,7 @@ A runnable Django project is included in the [`example/`](example/) directory. I
 
 ```bash
 cd example
+docker compose up -d
 uv run python manage.py migrate
 uv run python manage.py createsuperuser
 uv run python manage.py runserver
