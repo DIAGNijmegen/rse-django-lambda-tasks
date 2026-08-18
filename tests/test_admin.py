@@ -281,3 +281,30 @@ class TestReplayAction:
 
         action_names = list(model_admin.get_actions(request).keys())
         assert "replay_tasks" in action_names
+
+
+@pytest.mark.django_db()
+class TestKwargsSearchUsesIndex:
+    def test_admin_search_uses_gin_trigram_indexes(self) -> None:
+        """Verify the GIN trigram indexes are used for admin search queries."""
+        from django.db import connection
+        from django.test import RequestFactory
+
+        model_admin = admin.site._registry[TaskRecord]
+        request = RequestFactory().get("/", data={"q": "29992d75"})
+        request.user = User(is_staff=True, is_superuser=True)
+
+        changelist = model_admin.get_changelist_instance(request)
+        queryset = changelist.get_queryset(request)
+
+        sql, params = queryset.query.sql_with_params()
+        with connection.cursor() as cursor:
+            cursor.execute("SET enable_seqscan = off")
+            cursor.execute("SET enable_indexscan = off")
+            cursor.execute(f"EXPLAIN {sql}", params)
+            plan = "\n".join(row[0] for row in cursor.fetchall())
+            cursor.execute("SET enable_indexscan = on")
+            cursor.execute("SET enable_seqscan = on")
+
+        assert "taskrecord_id_trgm" in plan
+        assert "taskrecord_kwargs_trgm" in plan
