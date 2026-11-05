@@ -7,7 +7,7 @@ packages = ["lambda_tasks"]
 
 [project]
 name = "django-lambda-tasks"
-version = "0.9.0"
+version = "0.9.1"
 description = "Run async tasks in a lambda function"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,6 +27,11 @@ otel = [
     "opentelemetry-instrumentation-aws-lambda",
     "opentelemetry-sdk-extension-aws",
     "opentelemetry-propagator-aws-xray",
+    "opentelemetry-instrumentation-psycopg",
+    "opentelemetry-instrumentation-botocore",
+    "opentelemetry-instrumentation-requests",
+    "opentelemetry-instrumentation-httpx",
+    "opentelemetry-instrumentation-redis",
 ]
 
 [dependency-groups]
@@ -41,6 +46,7 @@ dev = [
     "pytest-cov",
     "ty",
     "psycopg",
+    "httpx",
     "django-lambda-tasks[otel]",
 ]
 
