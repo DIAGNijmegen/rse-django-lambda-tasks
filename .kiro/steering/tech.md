@@ -28,6 +28,11 @@ Installed via the `otel` extra (`pip install django-lambda-tasks[otel]`). Enable
 | `opentelemetry-instrumentation-aws-lambda` | Wraps the Lambda handler (`AwsLambdaInstrumentor`) |
 | `opentelemetry-sdk-extension-aws` | X-Ray id generator (`AwsXRayIdGenerator`) |
 | `opentelemetry-propagator-aws-xray` | X-Ray trace propagator |
+| `opentelemetry-instrumentation-psycopg` | SQL query spans (psycopg 3) |
+| `opentelemetry-instrumentation-botocore` | AWS SDK spans — every boto3 / aioboto3 call |
+| `opentelemetry-instrumentation-requests` | Outbound HTTP spans via `requests` |
+| `opentelemetry-instrumentation-httpx` | Outbound HTTP spans via `httpx` |
+| `opentelemetry-instrumentation-redis` | Cache operation spans (`django_redis` → `redis-py`) |
 | `requests` | OTLP/HTTP transport session (SigV4-signed via `botocore`) |
 
 ## Dev Dependencies

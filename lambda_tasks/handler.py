@@ -34,13 +34,6 @@ from lambda_tasks.tracing import (
 
 logger = logging.getLogger(__name__)
 
-# Initialise tracing at import time so the Lambda instrumentor can wrap the
-# handler before the first invocation (which is earlier than the cold-start
-# django.setup() inside handler()). No-op unless OTEL_EXPORTER_OTLP_ENDPOINT
-# is set.
-configure_tracing()
-instrument_lambda_handler()
-
 _cold_start_done: bool = False
 
 
@@ -189,6 +182,16 @@ def main() -> int:
         return 1
     else:
         return 0
+
+
+# Initialise tracing at import time so the Lambda instrumentor can wrap the
+# handler before the runtime invokes it (which is earlier than the cold-start
+# django.setup() inside handler()). This MUST run after `handler` and `main`
+# are defined: wrapt resolves the handler by attribute lookup on this module,
+# and wrapping a name that does not exist yet raises AttributeError. No-op
+# unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
+configure_tracing()
+instrument_lambda_handler()
 
 
 if __name__ == "__main__":
