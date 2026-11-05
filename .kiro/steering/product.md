@@ -31,6 +31,7 @@ Key modules:
 - `models.py` — `TaskRecord` (Django ORM), `SQSLambdaTaskMessage` (SQS schema + execution), `SQSLambdaTask` (routing + SQS publish, Batch submit, or local pool submit)
 - `local_executor.py` — `ProcessPoolExecutor`-based async local execution for development
 - `handler.py` — AWS Lambda entry point + AWS Batch container entry point (`main()`)
+- `tracing.py` — optional OpenTelemetry tracing (import-time setup, direct X-Ray OTLP export, SigV4-signed)
 - `logging.py` — `task_logger` for invocation-scoped log output
 - `settings.py` — lazy `LambdaTasksSettings` reading from Django settings, queue type helpers
 
@@ -158,6 +159,7 @@ class SQSLambdaTaskMessage(BaseModel):
 - Reads `LAMBDA_TASKS_MESSAGE` env var (the serialized task JSON, set by `submit_batch_job` via container overrides)
 - Uses `AWS_BATCH_JOB_ID` as the `message_id` (falls back to UUID4 if not set)
 - Constructs a synthetic SQS event and delegates to `handler()` — reuses the full cold-start and execution path
+- Before returning, force-flushes and shuts down the global `TracerProvider` (if OTEL tracing is configured) so short-lived Batch jobs do not drop buffered spans
 - Returns exit code 0 on success, 1 on failure
 
 ## Environment Loader
@@ -296,6 +298,24 @@ Relying on `atexit` alone loses this race in applications with a heavy shutdown 
 | `lambda_tasks.W003` | `LAMBDA_TASKS_LOCAL_WORKERS > 0` | Tasks will run in a local process pool |
 
 The checks are registered via `AppConfig.ready()` and tagged with `deploy=True` so they only fire during `--deploy` checks.
+
+## OpenTelemetry Tracing (optional)
+
+`lambda_tasks/tracing.py` adds OpenTelemetry tracing to the Lambda and Batch execution paths without the managed ADOT Lambda layer — the OTEL packages installed in the application image are the single source of instrumentation (reproducible-build friendly).
+
+Setup lives in the handler module, **not** Django settings. `AwsLambdaInstrumentor` must wrap the handler named by `_HANDLER`/`ORIG_HANDLER` **before** the runtime invokes it, which is earlier than the cold-start `django.setup()` inside `handler()`. So `lambda_tasks.handler` calls `configure_tracing()` and `instrument_lambda_handler()` at **import time**, and the setup is driven purely by standard OTEL environment variables (settings are not configured yet at import time).
+
+Behaviour:
+- Gated on `OTEL_EXPORTER_OTLP_ENDPOINT` (or the per-signal `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`). Unset → everything is a no-op (local dev, tests, un-opted-in deployments).
+- Builds a `TracerProvider` with an OTLP/HTTP span exporter via a `BatchSpanProcessor`. Spans go **directly** to the AWS X-Ray OTLP traces endpoint (`https://xray.<region>.amazonaws.com/v1/traces`) — no collector, no daemon, no Lambda layer.
+- The exporter's `requests` session SigV4-signs each export with the ambient AWS credentials (task / execution role) via `botocore` — no API key to manage. Unsigned when no credentials are resolvable.
+- Uses the AWS X-Ray id generator (`AwsXRayIdGenerator`) so the X-Ray backend accepts the trace IDs, and the X-Ray propagator (`AwsXRayLambdaPropagator` on Lambda, else `AwsXRayPropagator`). The X-Ray packages (`opentelemetry-sdk-extension-aws`, `opentelemetry-propagator-aws-xray`) are part of the `otel` extra.
+- The OpenTelemetry / `requests` imports are **deferred into the functions** (module scope imports only `os`), so the OTEL packages remain a genuinely optional extra: importing `lambda_tasks.handler` with them uninstalled is a no-op, not an `ImportError`. The disabled path (endpoint unset) never reaches any OTEL import.
+- Lambda path: also calls `AwsLambdaInstrumentor().instrument()` (only when `AWS_LAMBDA_FUNCTION_NAME` is set). Batch path (`main()`): the instrumentor is skipped (no handler to wrap); the provider alone is configured.
+- Flush on shutdown: `main()` calls `TracerProvider.force_flush()` / `shutdown()` before the one-shot process exits so short-lived Batch jobs do not drop buffered spans. The Lambda path needs no manual flush — `AwsLambdaInstrumentor` force-flushes per invocation.
+- Best-effort and observable: tracing must never take down the worker. `configure_tracing()` and `instrument_lambda_handler()` catch setup failures (missing OTEL packages, provider build errors) and log a warning instead of raising — important because they run at the handler module's import time. The `lambda_tasks.tracing` logger also surfaces otherwise-silent conditions at `INFO`/`WARNING`: tracing configured / already configured / disabled, handler instrumented or skipped (not on Lambda), no resolvable AWS region, and no resolvable AWS credentials (which would make exports unsigned and rejected by X-Ray).
+
+`configure_tracing()` returns the installed provider (or `None` when disabled or already configured — it is idempotent). Install the OTEL packages via the `otel` extra; the consuming application sets `OTEL_EXPORTER_OTLP_ENDPOINT` and declares the X-Ray packages it wants.
 
 ## Logging
 

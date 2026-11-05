@@ -17,6 +17,19 @@ inclusion: always
 | `boto3` | `>= 1.42.69` | AWS SDK — SQS publishing, Lambda integration |
 | `pydantic` | `>= 2.12.5` | Task argument serialization via `SQSLambdaTaskMessage` model |
 
+## Optional Dependencies
+
+Installed via the `otel` extra (`pip install django-lambda-tasks[otel]`). Enables OpenTelemetry tracing in `lambda_tasks/tracing.py`; the library stays generic without them. SigV4 signing reuses `botocore` (already a boto3 transitive dependency) — no extra signing package.
+
+| Package | Purpose |
+|---|---|
+| `opentelemetry-sdk` | `TracerProvider`, `BatchSpanProcessor` |
+| `opentelemetry-exporter-otlp-proto-http` | OTLP/HTTP span exporter (no gRPC, no meta-package) |
+| `opentelemetry-instrumentation-aws-lambda` | Wraps the Lambda handler (`AwsLambdaInstrumentor`) |
+| `opentelemetry-sdk-extension-aws` | X-Ray id generator (`AwsXRayIdGenerator`) |
+| `opentelemetry-propagator-aws-xray` | X-Ray trace propagator |
+| `requests` | OTLP/HTTP transport session (SigV4-signed via `botocore`) |
+
 ## Dev Dependencies
 
 | Package | Version | Purpose |

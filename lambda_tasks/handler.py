@@ -26,8 +26,20 @@ from django.apps import apps
 
 from lambda_tasks.environment_loader import resolve_environment
 from lambda_tasks.secret_loader import resolve_secrets_into_env
+from lambda_tasks.tracing import (
+    configure_tracing,
+    flush_tracing,
+    instrument_lambda_handler,
+)
 
 logger = logging.getLogger(__name__)
+
+# Initialise tracing at import time so the Lambda instrumentor can wrap the
+# handler before the first invocation (which is earlier than the cold-start
+# django.setup() inside handler()). No-op unless OTEL_EXPORTER_OTLP_ENDPOINT
+# is set.
+configure_tracing()
+instrument_lambda_handler()
 
 _cold_start_done: bool = False
 
@@ -169,10 +181,14 @@ def main() -> int:
         context=None,
     )
 
+    # Flush any buffered spans before the one-shot process exits (no-op unless
+    # tracing is enabled — this never imports OTEL otherwise).
+    flush_tracing()
+
     if result["batchItemFailures"]:
         return 1
-
-    return 0
+    else:
+        return 0
 
 
 if __name__ == "__main__":
