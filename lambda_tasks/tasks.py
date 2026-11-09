@@ -11,7 +11,11 @@ from lambda_tasks.models import SQSLambdaTaskMessage, TaskRecord
 from lambda_tasks.settings import BatchQueueConfig, LambdaTasksSettings
 
 
-@lambda_task
+@lambda_task(
+    singleton=True,
+    # No need to retry here as this should be retried periodically
+    retry_singleton=False,
+)
 def cleanup_task_records(*, retention_days: int = 7) -> int:
     """Delete TaskRecord rows older than ``retention_days``.
 
