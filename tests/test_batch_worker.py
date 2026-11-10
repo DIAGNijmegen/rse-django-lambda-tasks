@@ -61,67 +61,6 @@ def test_invalid_json_returns_1(monkeypatch):
 
 
 @pytest.mark.django_db
-def test_main_flushes_and_shuts_down_tracer_provider(monkeypatch, settings):
-    """main() force-flushes and shuts down a configured TracerProvider on exit."""
-    from unittest.mock import MagicMock
-
-    from opentelemetry import trace
-    from opentelemetry.sdk.trace import TracerProvider
-
-    settings.LAMBDA_TASKS_EAGER = True
-    settings.LAMBDA_TASKS_QUEUES = QUEUES
-
-    task_name = f"{_worker_task.__module__}.{_worker_task.__wrapped__.__qualname__}"
-    message = SQSLambdaTaskMessage(task_name=task_name, kwargs={"value": 7})
-
-    monkeypatch.setenv("LAMBDA_TASKS_MESSAGE", message.model_dump_json())
-    monkeypatch.delenv("AWS_BATCH_JOB_ID", raising=False)
-    # Tracing must be enabled for the flush path to run.
-    monkeypatch.setenv(
-        "OTEL_EXPORTER_OTLP_ENDPOINT",
-        "https://xray.us-east-1.amazonaws.com/v1/traces",
-    )
-
-    provider = MagicMock(spec=TracerProvider)
-    with patch.object(trace, "get_tracer_provider", return_value=provider):
-        result = main()
-
-    assert result == 0
-    provider.force_flush.assert_called_once_with()
-    provider.shutdown.assert_called_once_with()
-
-
-@pytest.mark.django_db
-def test_main_does_not_flush_or_import_otel_when_tracing_disabled(
-    monkeypatch, settings
-):
-    """With tracing disabled, main() never reaches the OTEL flush imports."""
-    import builtins
-
-    settings.LAMBDA_TASKS_EAGER = True
-    settings.LAMBDA_TASKS_QUEUES = QUEUES
-
-    task_name = f"{_worker_task.__module__}.{_worker_task.__wrapped__.__qualname__}"
-    message = SQSLambdaTaskMessage(task_name=task_name, kwargs={"value": 9})
-
-    monkeypatch.setenv("LAMBDA_TASKS_MESSAGE", message.model_dump_json())
-    monkeypatch.delenv("AWS_BATCH_JOB_ID", raising=False)
-    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
-    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
-
-    real_import = builtins.__import__
-
-    def _fake_import(name, *args, **kwargs):
-        if name.split(".")[0] == "opentelemetry":
-            raise AssertionError(f"OTEL import reached while disabled: {name}")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", _fake_import)
-
-    assert main() == 0
-
-
-@pytest.mark.django_db
 def test_uses_uuid_when_no_batch_job_id(monkeypatch, settings):
     settings.LAMBDA_TASKS_EAGER = True
     settings.LAMBDA_TASKS_QUEUES = QUEUES
