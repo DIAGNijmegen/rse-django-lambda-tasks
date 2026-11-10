@@ -33,7 +33,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _XRAY_SIGV4_SERVICE_NAME = "xray"
-_LAMBDA_HANDLER = "lambda_tasks.handler.handler"
 
 
 def tracing_is_enabled() -> bool:
@@ -263,8 +262,8 @@ def configure_tracing() -> "TracerProvider | None":
 def instrument_lambda_handler() -> None:
     """Wrap the Lambda handler for tracing. No-op unless enabled.
 
-    Must be called at import time of the handler module, AFTER `handler` is
-    defined (see the handler module), before the runtime invokes the handler.
+    Must be called at import time of the handler module, before the runtime
+    invokes the handler.
     """
     if not tracing_is_enabled():
         return
@@ -275,12 +274,6 @@ def instrument_lambda_handler() -> None:
             "skipping AwsLambdaInstrumentor."
         )
         return
-
-    # AwsLambdaInstrumentor derives the handler to wrap from
-    # ORIG_HANDLER / _HANDLER. Container images launched via awslambdaric pass
-    # the handler as a CMD arg, which is not exported as _HANDLER, so default
-    # it here. setdefault() leaves any explicitly configured value untouched.
-    os.environ.setdefault("ORIG_HANDLER", _LAMBDA_HANDLER)
 
     try:
         from opentelemetry.instrumentation.aws_lambda import (
