@@ -25,8 +25,6 @@ import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     import requests
     from opentelemetry.sdk.trace import TracerProvider
 
@@ -151,66 +149,6 @@ def _set_xray_propagator() -> None:
     )
 
 
-def _instrument_libraries() -> None:
-    """Instrument the libraries whose calls we want as spans.
-
-    SQL (psycopg 3), AWS SDK (botocore → boto3/aioboto3), outbound HTTP
-    (requests and httpx), and cache (redis). Each is wrapped independently and
-    is best-effort: a missing or failing instrumentor is logged, not raised, so
-    it cannot take down the worker. All are process-global and idempotent.
-
-    The OTLP span export itself goes out over ``requests`` to the X-Ray
-    endpoint; that URL is excluded from the requests instrumentor so the
-    exporter's own calls are not traced (which would be self-referential noise).
-    """
-
-    def _try(name: str, instrument: "Callable[[], None]") -> None:
-        try:
-            instrument()
-        except Exception:
-            logger.warning(
-                "Failed to instrument %s for tracing; continuing without it.",
-                name,
-                exc_info=True,
-            )
-        else:
-            logger.info("%s instrumentation installed.", name)
-
-    def _psycopg() -> None:
-        from opentelemetry.instrumentation.psycopg import PsycopgInstrumentor
-
-        PsycopgInstrumentor().instrument()
-
-    def _botocore() -> None:
-        from opentelemetry.instrumentation.botocore import BotocoreInstrumentor
-
-        BotocoreInstrumentor().instrument()
-
-    def _requests() -> None:
-        from opentelemetry.instrumentation.requests import RequestsInstrumentor
-
-        # Do not trace the exporter's own POST to the X-Ray OTLP endpoint.
-        RequestsInstrumentor().instrument(excluded_urls="xray\\..*\\.amazonaws\\.com")
-
-    def _httpx() -> None:
-        from opentelemetry.instrumentation.httpx import (
-            HTTPXClientInstrumentor,
-        )
-
-        HTTPXClientInstrumentor().instrument()
-
-    def _redis() -> None:
-        from opentelemetry.instrumentation.redis import RedisInstrumentor
-
-        RedisInstrumentor().instrument()
-
-    _try("psycopg", _psycopg)
-    _try("botocore", _botocore)
-    _try("requests", _requests)
-    _try("httpx", _httpx)
-    _try("redis", _redis)
-
-
 def configure_tracing() -> "TracerProvider | None":
     """Install the global tracer provider. No-op unless enabled.
 
@@ -239,7 +177,6 @@ def configure_tracing() -> "TracerProvider | None":
         tracer_provider = _build_tracer_provider()
         trace.set_tracer_provider(tracer_provider)
         _set_xray_propagator()
-        _instrument_libraries()
     except ImportError:
         logger.warning(
             "OTEL tracing is enabled but the OpenTelemetry packages are not "
