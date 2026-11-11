@@ -21,7 +21,7 @@ from redis.exceptions import LockError
 
 from lambda_tasks.local_executor import submit_task
 from lambda_tasks.logging import task_logger
-from lambda_tasks.sentry import task_scope
+from lambda_tasks.sentry import capture_task_exception, task_scope
 from lambda_tasks.settings import (
     MAX_DELAY,
     BatchQueueConfig,
@@ -210,6 +210,7 @@ class SQSLambdaTaskMessage(BaseModel):
             elif effective_retry_on and isinstance(error, effective_retry_on):
                 conf = LambdaTasksSettings()
                 if self.n_retries >= conf.MAX_RETRIES:
+                    capture_task_exception()
                     record.status = TaskStatus.FAILED
                     record.traceback = traceback.format_exc()
                     record.end_time = now()
@@ -251,6 +252,7 @@ class SQSLambdaTaskMessage(BaseModel):
             else:
                 task_logger.error(error, exc_info=True)
 
+                capture_task_exception()
                 record.status = TaskStatus.FAILED
                 record.traceback = traceback.format_exc()
                 record.end_time = now()

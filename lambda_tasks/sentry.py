@@ -69,14 +69,37 @@ def _set_metadata(span: Any, *, key: str, value: Any) -> None:
 def _start_task_root(*, task_name: str) -> Any:
     """Start and return the per-task root span/transaction context manager.
 
-    Uses ``start_transaction`` on SDK 2.x (where a root span must be a
-    transaction to be sent) and ``start_span`` on SDK 3.0 (where transactions
-    no longer exist and ``start_span`` is the root in stream mode).
+    The tracing API differs across the SDK 2.x → 3.0 boundary:
+
+    * 2.x — ``start_transaction(name=, op=)`` creates the root transaction
+      (a bare ``start_span`` with no active transaction is dropped).
+    * 3.0 — transactions are gone; ``start_span(name=)`` is the root in stream
+      mode. ``start_span`` no longer accepts ``op`` (it is an attribute now),
+      so only ``name`` is passed and ``op`` is recorded via ``_set_metadata``.
     """
     if hasattr(sentry_sdk, "start_transaction"):
         return sentry_sdk.start_transaction(name=task_name, op="task")
     else:
-        return sentry_sdk.start_span(name=task_name, op="task")
+        return sentry_sdk.start_span(name=task_name)
+
+
+def capture_task_exception() -> None:
+    """Report the exception currently being handled to Sentry.
+
+    The executor catches task exceptions (recording a ``FAILED`` TaskRecord)
+    rather than re-raising, so the exception never propagates to an integration
+    that would report it. This matters most on SDK 3.0 (stream mode), where a
+    caught exception produces no error event at all — on 2.x the exception
+    happened to still be reported as it passed through the active span. Calling
+    this on the terminal failure path gives consistent error reporting on both
+    SDK versions.
+
+    Must be called from within an ``except`` block while the task's
+    :func:`task_scope` is still active, so the error carries the task name and
+    tags. A no-op when ``sentry_sdk`` is unavailable or uninitialised.
+    """
+    if sentry_sdk and sentry_sdk.is_initialized():
+        sentry_sdk.capture_exception()
 
 
 @contextlib.contextmanager
