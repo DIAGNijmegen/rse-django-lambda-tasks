@@ -442,6 +442,7 @@ Use `DjangoIntegration` + `LoggingIntegration(event_level=logging.ERROR)`, and *
 
 ```python
 import logging
+from sentry_sdk.integrations.aws_lambda import AwsLambdaIntegration
 from sentry_sdk.integrations.django import DjangoIntegration
 from sentry_sdk.integrations.logging import LoggingIntegration
 
@@ -450,6 +451,9 @@ sentry_sdk.init(
     integrations=[
         DjangoIntegration(),
         LoggingIntegration(event_level=logging.ERROR),
+    ],
+    disabled_integrations=[
+        AwsLambdaIntegration(),
     ],
     traces_sample_rate=0.1,
 )
