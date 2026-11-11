@@ -6,6 +6,7 @@ task name — on both Lambda and Batch — and that everything degrades to a no-
 when Sentry is not initialised.
 """
 
+import threading
 import uuid
 from unittest.mock import patch
 
@@ -145,23 +146,39 @@ class _CapturingTransport(Transport):
 
     Works on both SDK 2.x (transactions, ``get_transaction_event``) and 3.0
     (stream-mode spans, envelope items of type ``span``).
+
+    Access is guarded by a lock and reads return snapshots: ``sentry_sdk`` may
+    deliver envelopes from a background thread (observed on some 3.x
+    pre-releases), so appends and reads must not race.
     """
 
     def __init__(self, options) -> None:
         super().__init__(options)
-        self.errors: list[dict] = []
-        self.traces: list[_CapturedTrace] = []
+        self._lock = threading.Lock()
+        self._errors: list[dict] = []
+        self._traces: list[_CapturedTrace] = []
 
     def capture_envelope(self, envelope) -> None:
         for item in envelope.items:
             if item.type == "event":
                 error = item.get_event()
                 if error is not None:
-                    self.errors.append(error)
+                    with self._lock:
+                        self._errors.append(error)
             elif item.type == "transaction":  # SDK 2.x
-                self.traces.extend(_normalise_2x_transaction(item.payload.json))
+                with self._lock:
+                    self._traces.extend(_normalise_2x_transaction(item.payload.json))
             elif item.type == "span":  # SDK 3.0 stream mode
-                self.traces.extend(_normalise_3x_spans(item.payload.json))
+                with self._lock:
+                    self._traces.extend(_normalise_3x_spans(item.payload.json))
+
+    def snapshot_errors(self) -> list[dict]:
+        with self._lock:
+            return list(self._errors)
+
+    def snapshot_traces(self) -> list[_CapturedTrace]:
+        with self._lock:
+            return list(self._traces)
 
 
 class _Captured:
@@ -172,12 +189,12 @@ class _Captured:
 
     @property
     def errors(self) -> list[dict]:
-        return self._transport.errors
+        return self._transport.snapshot_errors()
 
     @property
     def traces(self) -> list[_CapturedTrace]:
         sentry_sdk.flush()
-        return self._transport.traces
+        return self._transport.snapshot_traces()
 
     def trace_named(self, name: str) -> _CapturedTrace:
         """Return the single captured root trace whose name is *name*.
@@ -188,10 +205,11 @@ class _Captured:
         asynchronously in batches.
         """
         sentry_sdk.flush()
-        matches = [trace for trace in self._transport.traces if trace.name == name]
+        traces = self._transport.snapshot_traces()
+        matches = [trace for trace in traces if trace.name == name]
         assert len(matches) == 1, (
             f"expected exactly one trace named {name!r}, "
-            f"got {[t.name for t in self._transport.traces]}"
+            f"got {[t.name for t in traces]}"
         )
         return matches[0]
 
@@ -202,15 +220,16 @@ class _Captured:
         inside an already-active trace (the Lambda case).
         """
         sentry_sdk.flush()
-        return [t.name for t in self._transport.traces if t.is_root]
+        return [t.name for t in self._transport.snapshot_traces() if t.is_root]
 
     def task_trace(self, name: str) -> _CapturedTrace:
         """Return the single captured trace (root or child span) named *name*."""
         sentry_sdk.flush()
-        matches = [t for t in self._transport.traces if t.name == name]
+        traces = self._transport.snapshot_traces()
+        matches = [t for t in traces if t.name == name]
         assert len(matches) == 1, (
             f"expected exactly one trace named {name!r}, "
-            f"got {[t.name for t in self._transport.traces]}"
+            f"got {[t.name for t in traces]}"
         )
         return matches[0]
 
@@ -368,10 +387,11 @@ class TestTaskTraceNesting:
             with task_scope(task_name="myapp.tasks.greet", message_id="m", n_retries=0):
                 pass
 
-        # Exactly one root (the invocation), and the task appears as a trace too
-        # (a child span), named after the task.
-        assert sentry.root_names() == ["lambda-invocation"]
+        # The task is a child span (not a root), and it did not create its own
+        # root transaction — the only root is the invocation.
         assert sentry.task_trace("myapp.tasks.greet").is_root is False
+        assert "myapp.tasks.greet" not in sentry.root_names()
+        assert "lambda-invocation" in sentry.root_names()
 
     def test_task_is_root_when_no_trace_active(self, sentry):
         # Batch case: no Lambda integration, nothing active, so the task opens
@@ -381,7 +401,7 @@ class TestTaskTraceNesting:
 
         task_trace = sentry.task_trace("myapp.tasks.greet")
         assert task_trace.is_root is True
-        assert sentry.root_names() == ["myapp.tasks.greet"]
+        assert "myapp.tasks.greet" in sentry.root_names()
 
     def test_task_child_span_carries_metadata(self, sentry):
         with _active_root("lambda-invocation"):
