@@ -23,6 +23,7 @@ inclusion: always
 |---|---|---|
 | `pytest` | `>= 9.0.2` | Test runner |
 | `hypothesis` | present | Property-based testing (`.hypothesis/` directory exists) |
+| `sentry-sdk` | present | Testing the `task_scope` Sentry integration; not a runtime dependency |
 
 ## Package Manager
 

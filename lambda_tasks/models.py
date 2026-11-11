@@ -21,6 +21,7 @@ from redis.exceptions import LockError
 
 from lambda_tasks.local_executor import submit_task
 from lambda_tasks.logging import task_logger
+from lambda_tasks.sentry import task_scope
 from lambda_tasks.settings import (
     MAX_DELAY,
     BatchQueueConfig,
@@ -112,151 +113,168 @@ class SQSLambdaTaskMessage(BaseModel):
         Creates a TaskRecord, resolves timeouts, validates configuration,
         runs the task inside an atomic block with timeout enforcement, and
         persists the outcome.
+
+        Logging and Sentry context are scoped to the task for the duration of
+        the run so that exceptions are attributed to the task name rather than
+        to the Lambda function name or, on AWS Batch, to nothing at all.
         """
         task_logger.message_id = message_id
 
         try:
-            task_logger.info(f"Received {self.task_name}")
+            with task_scope(
+                task_name=self.task_name,
+                message_id=message_id,
+                n_retries=self.n_retries,
+            ):
+                self._run(message_id=message_id)
+        finally:
+            task_logger.message_id = None
 
-            # Local import to avoid circular dependency
-            from lambda_tasks.decorators import LambdaTaskWrapper
+    def _run(self, *, message_id: str) -> None:
+        """Resolve, run, and persist the outcome of the task.
 
-            wrapper = import_string(self.task_name)
+        Separated from :meth:`execute_immediately` so that the latter owns only
+        the logging and Sentry context management; this method holds the
+        execution logic and its early returns.
+        """
+        task_logger.info(f"Received {self.task_name}")
 
-            if not isinstance(wrapper, LambdaTaskWrapper):
-                raise TypeError(
-                    f"import_string('{self.task_name}') returned {type(wrapper)!r}, "
-                    f"expected LambdaTaskWrapper."
-                )
+        # Local import to avoid circular dependency
+        from lambda_tasks.decorators import LambdaTaskWrapper
 
-            # Resolve before creating the TaskRecord — ConfigurationError here means
-            # misconfigured settings, not a task failure, so no record should be written.
-            soft_timeout, hard_timeout = wrapper.resolved_timeouts
+        wrapper = import_string(self.task_name)
 
-            record, created = (
-                TaskRecord.objects.get_or_create(  # ty: ignore[unresolved-attribute]
-                    pk=message_id,
-                    defaults={
-                        "task_name": self.task_name,
-                        "kwargs": self.model_dump(mode="json")["kwargs"],
-                        "n_retries": self.n_retries,
-                        "status": TaskStatus.RUNNING,
-                        "start_time": now(),
-                    },
-                )
+        if not isinstance(wrapper, LambdaTaskWrapper):
+            raise TypeError(
+                f"import_string('{self.task_name}') returned {type(wrapper)!r}, "
+                f"expected LambdaTaskWrapper."
             )
 
-            if not created:
-                task_logger.warning(
-                    f"Skipping duplicate delivery (existing record status={record.status})"
-                )
-                return
+        # Resolve before creating the TaskRecord — ConfigurationError here means
+        # misconfigured settings, not a task failure, so no record should be written.
+        soft_timeout, hard_timeout = wrapper.resolved_timeouts
 
-            ignored_exception: BaseException | None = None
-            ignored_traceback: str | None = None
-            result = None
+        record, created = (
+            TaskRecord.objects.get_or_create(  # ty: ignore[unresolved-attribute]
+                pk=message_id,
+                defaults={
+                    "task_name": self.task_name,
+                    "kwargs": self.model_dump(mode="json")["kwargs"],
+                    "n_retries": self.n_retries,
+                    "status": TaskStatus.RUNNING,
+                    "start_time": now(),
+                },
+            )
+        )
 
-            if wrapper.singleton:
-                cache = caches[LambdaTasksSettings().SINGLETON_CACHE]
-                lock_ctx = cache.lock(
-                    f"lambda_tasks.singleton_lock.{self.task_name}",
-                    blocking_timeout=0,
-                    timeout=hard_timeout,
-                )
-                if wrapper.retry_singleton:
-                    effective_retry_on = (LockError, *wrapper.retry_on)
-                else:
-                    effective_retry_on = wrapper.retry_on
+        if not created:
+            task_logger.warning(
+                f"Skipping duplicate delivery (existing record status={record.status})"
+            )
+            return
+
+        ignored_exception: BaseException | None = None
+        ignored_traceback: str | None = None
+        result = None
+
+        if wrapper.singleton:
+            cache = caches[LambdaTasksSettings().SINGLETON_CACHE]
+            lock_ctx = cache.lock(
+                f"lambda_tasks.singleton_lock.{self.task_name}",
+                blocking_timeout=0,
+                timeout=hard_timeout,
+            )
+            if wrapper.retry_singleton:
+                effective_retry_on = (LockError, *wrapper.retry_on)
             else:
-                lock_ctx = contextlib.nullcontext()
                 effective_retry_on = wrapper.retry_on
+        else:
+            lock_ctx = contextlib.nullcontext()
+            effective_retry_on = wrapper.retry_on
 
-            try:
-                with lock_ctx:
-                    with transaction.atomic():
-                        with TimeoutContext(
-                            soft_timeout=soft_timeout, hard_timeout=hard_timeout
-                        ):
-                            result = wrapper(**self.kwargs)
-            except Exception as error:
-                if (
-                    wrapper.singleton
-                    and not wrapper.retry_singleton
-                    and isinstance(error, LockError)
-                ):
-                    ignored_exception = error
-                    ignored_traceback = traceback.format_exc()
-                elif effective_retry_on and isinstance(error, effective_retry_on):
-                    conf = LambdaTasksSettings()
-                    if self.n_retries >= conf.MAX_RETRIES:
-                        record.status = TaskStatus.FAILED
-                        record.traceback = traceback.format_exc()
-                        record.end_time = now()
-                        record.save(update_fields=["status", "traceback", "end_time"])
-
-                        task_logger.warning(
-                            f"Failed due to MaxRetriesExceededError in {record.duration}"
-                        )
-
-                        raise MaxRetriesExceededError(
-                            task_name=self.task_name, n_retries=self.n_retries
-                        )
-                    else:
-                        record.status = TaskStatus.RETRIED
-                        record.traceback = traceback.format_exc()
-                        record.end_time = now()
-                        record.save(update_fields=["status", "traceback", "end_time"])
-
-                        task_logger.warning(
-                            f"Retrying (due to {type(error).__name__}) after {record.duration}"
-                        )
-
-                        delay = min(
-                            wrapper.retry_delay + round(random.uniform(1, 5)), MAX_DELAY
-                        )
-
-                        retry_task = SQSLambdaTask(
-                            message=SQSLambdaTaskMessage(
-                                task_name=self.task_name,
-                                kwargs=self.kwargs,
-                                n_retries=self.n_retries + 1,
-                            ),
-                            delay=delay,
-                            queue=wrapper.queue,
-                        )
-                        retry_task.execute_on_commit()
-
-                        return
-                else:
-                    task_logger.error(error, exc_info=True)
-
+        try:
+            with lock_ctx:
+                with transaction.atomic():
+                    with TimeoutContext(
+                        soft_timeout=soft_timeout, hard_timeout=hard_timeout
+                    ):
+                        result = wrapper(**self.kwargs)
+        except Exception as error:
+            if (
+                wrapper.singleton
+                and not wrapper.retry_singleton
+                and isinstance(error, LockError)
+            ):
+                ignored_exception = error
+                ignored_traceback = traceback.format_exc()
+            elif effective_retry_on and isinstance(error, effective_retry_on):
+                conf = LambdaTasksSettings()
+                if self.n_retries >= conf.MAX_RETRIES:
                     record.status = TaskStatus.FAILED
                     record.traceback = traceback.format_exc()
                     record.end_time = now()
                     record.save(update_fields=["status", "traceback", "end_time"])
 
-                    task_logger.warning(f"Failed in {record.duration}")
+                    task_logger.warning(
+                        f"Failed due to MaxRetriesExceededError in {record.duration}"
+                    )
+
+                    raise MaxRetriesExceededError(
+                        task_name=self.task_name, n_retries=self.n_retries
+                    )
+                else:
+                    record.status = TaskStatus.RETRIED
+                    record.traceback = traceback.format_exc()
+                    record.end_time = now()
+                    record.save(update_fields=["status", "traceback", "end_time"])
+
+                    task_logger.warning(
+                        f"Retrying (due to {type(error).__name__}) after {record.duration}"
+                    )
+
+                    delay = min(
+                        wrapper.retry_delay + round(random.uniform(1, 5)), MAX_DELAY
+                    )
+
+                    retry_task = SQSLambdaTask(
+                        message=SQSLambdaTaskMessage(
+                            task_name=self.task_name,
+                            kwargs=self.kwargs,
+                            n_retries=self.n_retries + 1,
+                        ),
+                        delay=delay,
+                        queue=wrapper.queue,
+                    )
+                    retry_task.execute_on_commit()
+
                     return
-
-            if ignored_exception is None:
-                record.status = TaskStatus.SUCCEEDED
-                record.result = result
-                record.end_time = now()
-                record.save(update_fields=["status", "result", "end_time"])
-
-                task_logger.info(f"Succeeded in {record.duration}")
             else:
-                record.status = TaskStatus.SUCCEEDED
-                record.traceback = ignored_traceback
+                task_logger.error(error, exc_info=True)
+
+                record.status = TaskStatus.FAILED
+                record.traceback = traceback.format_exc()
                 record.end_time = now()
                 record.save(update_fields=["status", "traceback", "end_time"])
 
-                task_logger.info(
-                    f"Succeeded (ignored {type(ignored_exception).__name__}) in {record.duration}"
-                )
+                task_logger.warning(f"Failed in {record.duration}")
+                return
 
-        finally:
-            task_logger.message_id = None
+        if ignored_exception is None:
+            record.status = TaskStatus.SUCCEEDED
+            record.result = result
+            record.end_time = now()
+            record.save(update_fields=["status", "result", "end_time"])
+
+            task_logger.info(f"Succeeded in {record.duration}")
+        else:
+            record.status = TaskStatus.SUCCEEDED
+            record.traceback = ignored_traceback
+            record.end_time = now()
+            record.save(update_fields=["status", "traceback", "end_time"])
+
+            task_logger.info(
+                f"Succeeded (ignored {type(ignored_exception).__name__}) in {record.duration}"
+            )
 
 
 class SQSLambdaTask(BaseModel):
