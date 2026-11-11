@@ -432,6 +432,32 @@ fields @timestamp, @message
 | sort @timestamp asc
 ```
 
+### Sentry
+
+If your application uses Sentry, tasks are automatically attributed to their task name. Without this, Sentry's `AwsLambdaIntegration` names every event's transaction after the Lambda function (so all tasks share one transaction), and on AWS Batch there is no transaction at all (it shows as `"--"`) — so you cannot tell which task raised an error.
+
+You do **not** need to add a custom integration or change your `sentry_sdk.init(...)`. Keep your existing setup:
+
+```python
+sentry_sdk.init(
+    dsn=SENTRY_DSN,
+    integrations=[DjangoIntegration(), AwsLambdaIntegration()],
+    # ...
+)
+```
+
+When a task runs, `execute_immediately()` opens an isolated Sentry scope **and a per-task trace** (a root span/transaction named after the task). With `traces_sample_rate` set, you get one trace per task on both Lambda and Batch — rather than a single invocation-level transaction shared across a batch of SQS records. It sets, on both the span and the scope:
+
+- the **transaction/span name** to the fully-qualified task name (e.g. `myapp.tasks.send_welcome_email`), overriding the Lambda function name on Lambda and replacing `"--"` on Batch
+- `lambda_task` (task name), `lambda_task.message_id`, and `lambda_task.n_retries`
+- `lambda_task.runtime` — the physical execution environment, derived from the AWS environment: the Lambda function name (`AWS_LAMBDA_FUNCTION_NAME`) on Lambda, or the Batch job queue name (`AWS_BATCH_JQ_NAME`) on Batch. Omitted when neither is set (e.g. local/eager execution).
+
+This covers task failures too: the executor records failures as `FAILED` `TaskRecord`s rather than re-raising, so the trace wraps the task body to ensure Sentry error events still carry the task name.
+
+The integration is future-proof across the sentry-sdk 2.x→3.0 boundary: it uses `start_transaction`/`set_tag` on 2.x and `start_span`/`set_attribute` on 3.0 (stream mode), chosen automatically at runtime — no change needed when you upgrade the SDK.
+
+`sentry_sdk` is not a dependency of this library — if it is not installed or not initialised, the enrichment is a silent no-op.
+
 ---
 
 ## Automatic retries

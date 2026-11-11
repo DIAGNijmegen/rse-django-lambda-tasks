@@ -127,7 +127,7 @@ class SQSLambdaTaskMessage(BaseModel):
 
 ## Execution
 
-`SQSLambdaTaskMessage.execute_immediately(*, message_id: str)` in `models.py`:
+`SQSLambdaTaskMessage.execute_immediately(*, message_id: str)` in `models.py` sets the `task_logger` `message_id` and enters `task_scope(...)` (Sentry transaction name + tags), then delegates the run to the private `_run(*, message_id)` method which:
 1. Checks for an existing `TaskRecord` with the same `pk` (`message_id`) via `get_or_create`
 2. If a record already exists (any status), logs and returns immediately — duplicate deliveries are silently skipped
 3. Resolves timeouts: decorator default → settings defaults (soft=270s, hard=300s), validated against queue max (900 for SQS, 3600 for Batch)
@@ -312,6 +312,24 @@ def my_task(*, user_id: int) -> None:
 ```
 
 `task_logger` is a `LoggerAdapter` wrapping the `lambda_tasks.task` logger. The executor sets the `message_id` before each task runs and clears it in a `finally` block. Using your own `logging.getLogger(__name__)` is fine — those records just won't carry the prefix.
+
+## Sentry
+
+The library does not call `sentry_sdk.init(...)` — the host application owns Sentry setup (typically `DjangoIntegration` + `AwsLambdaIntegration`). The problem those integrations leave is attribution: on Lambda, `AwsLambdaIntegration` names every event's transaction after the Lambda function, so all tasks share one transaction (and a single invocation-level transaction is shared across a batch of SQS records); on AWS Batch there is no request and no Lambda integration, so the transaction and URL are `"--"` and `traces_sample_rate` produces no trace for the task body. Either way you cannot tell which task ran or raised.
+
+`lambda_tasks.sentry.task_scope(*, task_name, message_id, n_retries)` fixes this. `execute_immediately` wraps the task body in it, which — when a Sentry client is active — opens an isolated `sentry_sdk.new_scope()` **and a per-task root span/transaction** named after the task. This gives one trace per task on both Lambda and Batch. It records, both on the span and as scope tags:
+
+- transaction/span **name** = the fully-qualified task name (e.g. `myapp.tasks.my_task`)
+- `lambda_task` = task name
+- `lambda_task.message_id` = the `TaskRecord` primary key
+- `lambda_task.n_retries` = the retry counter
+- `lambda_task.runtime` = the physical execution environment, read from the AWS environment: `AWS_LAMBDA_FUNCTION_NAME` on Lambda or `AWS_BATCH_JQ_NAME` (the Batch job queue name) on Batch; omitted when neither is present
+
+The scope covers the success, retry, and failure paths, so task-logic exceptions (which the executor records as `FAILED` and does not re-raise to the handler) still carry the task name when captured by Sentry. The scope tags are kept in addition to span metadata so error events are attributed even when the performance span is not sampled.
+
+**SDK version compatibility:** `task_scope` is future-proof across the sentry-sdk 2.x→3.0 boundary. On 2.x it uses `start_transaction` + `set_tag` (a root span must be a transaction to be sent); on 3.0 (stream mode, where transactions are removed and tags no longer propagate to spans) it uses `start_span` + `set_attribute`. The correct API is detected at runtime via `hasattr`, so no code change is needed when the host upgrades the SDK.
+
+`task_scope` is a no-op when `sentry_sdk` is not installed or no client is initialised, so Sentry is not a dependency of the library. `sentry-sdk` is a dev dependency only, for the test suite. No custom Sentry integration is needed — per-task tracing at the one execution entry point covers both Lambda and Batch.
 
 ## Built-in Tasks
 

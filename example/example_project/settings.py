@@ -88,3 +88,10 @@ LOGGING = {
         "level": "INFO",
     },
 }
+
+# Optional Sentry integration — set SENTRY_DSN to enable. Initialised here (at
+# settings import) so it also runs inside each local process-pool worker, which
+# imports settings via django.setup(). See example_project/sentry.py.
+from example_project.sentry import init_sentry  # noqa: E402
+
+init_sentry()
