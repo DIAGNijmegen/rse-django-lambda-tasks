@@ -7,7 +7,7 @@ packages = ["lambda_tasks"]
 
 [project]
 name = "django-lambda-tasks"
-version = "0.11.0"
+version = "0.11.1"
 description = "Run async tasks in a lambda function"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,7 +31,7 @@ dev = [
     "pytest-cov",
     "ty",
     "psycopg",
-    "sentry-sdk",
+    "sentry-sdk>=2,<3",
 ]
 
 [tool.ty.rules]

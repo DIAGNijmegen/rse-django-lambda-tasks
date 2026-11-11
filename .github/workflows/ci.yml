@@ -53,3 +53,35 @@ jobs:
       - name: Run tests
         run: |
           uv run pytest --cov-branch --cov-report term-missing --cov=tests/ --cov=lambda_tasks/
+
+  sentry-prerelease:
+    # Exercise the Sentry integration against the latest 3.x pre-release of
+    # sentry-sdk (stream mode). The committed dev dependency is pinned to the
+    # stable 2.x line; this job overrides it at runtime via `uv run --with`
+    # without touching pyproject.toml, so regressions in the 3.x API are caught
+    # before the SDK goes stable.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: lambda_tasks_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install uv and set the python version
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: '3.14'
+      - name: Run tests against the latest sentry-sdk 3.x pre-release
+        run: |
+          uv run --prerelease=allow --with "sentry-sdk>=3.0.0b1" \
+            pytest --cov-branch --cov-report term-missing --cov=tests/ --cov=lambda_tasks/

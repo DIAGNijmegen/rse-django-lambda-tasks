@@ -434,29 +434,54 @@ fields @timestamp, @message
 
 ### Sentry
 
-If your application uses Sentry, tasks are automatically attributed to their task name. Without this, Sentry's `AwsLambdaIntegration` names every event's transaction after the Lambda function (so all tasks share one transaction), and on AWS Batch there is no transaction at all (it shows as `"--"`) — so you cannot tell which task raised an error.
+If your application uses Sentry, task errors are automatically attributed to the task that raised them. Without this, Sentry's `AwsLambdaIntegration` names every event's transaction after the Lambda function (so all tasks look the same), and on AWS Batch there is no transaction at all (it shows as `"--"`) — so you cannot tell which task failed.
 
-You do **not** need to add a custom integration or change your `sentry_sdk.init(...)`. Keep your existing setup:
+Keep your existing `sentry_sdk.init(...)`. On **sentry-sdk 2.x** no change is needed. On **sentry-sdk 3.0+** one option changed default and must be set explicitly if you want error-level logs reported (see below):
 
 ```python
+import logging
+from sentry_sdk.integrations.logging import LoggingIntegration
+
 sentry_sdk.init(
     dsn=SENTRY_DSN,
-    integrations=[DjangoIntegration(), AwsLambdaIntegration()],
-    # ...
+    integrations=[
+        DjangoIntegration(),
+        AwsLambdaIntegration(),
+        # Only needed on sentry-sdk 3.0+: its default event_level is None, so
+        # logger.error(...) no longer becomes a Sentry event. On 2.x this was
+        # the default and setting it is harmless.
+        LoggingIntegration(event_level=logging.ERROR),
+    ],
+    traces_sample_rate=0.1,
 )
 ```
 
-When a task runs, `execute_immediately()` opens an isolated Sentry scope **and a per-task trace** (a root span/transaction named after the task). With `traces_sample_rate` set, you get one trace per task on both Lambda and Batch — rather than a single invocation-level transaction shared across a batch of SQS records. It sets, on both the span and the scope:
+#### What the library does per task
 
-- the **transaction/span name** to the fully-qualified task name (e.g. `myapp.tasks.send_welcome_email`), overriding the Lambda function name on Lambda and replacing `"--"` on Batch
-- `lambda_task` (task name), `lambda_task.message_id`, and `lambda_task.n_retries`
-- `lambda_task.runtime` — the physical execution environment, derived from the AWS environment: the Lambda function name (`AWS_LAMBDA_FUNCTION_NAME`) on Lambda, or the Batch job queue name (`AWS_BATCH_JQ_NAME`) on Batch. Omitted when neither is set (e.g. local/eager execution).
+When a task runs, `execute_immediately()` opens an isolated Sentry scope and traces the task:
 
-This covers task failures too: the executor records failures as `FAILED` `TaskRecord`s rather than re-raising, so the trace wraps the task body to ensure Sentry error events still carry the task name.
+- **On Lambda**, the task is traced as a **child span** of the invocation transaction that `AwsLambdaIntegration` already started — not a second transaction. This keeps task tracing from doubling your transaction volume and respects `traces_sample_rate`.
+- **On Batch** (no Lambda integration, nothing active), the task starts **its own root transaction** so it is still traced.
 
-The integration is future-proof across the sentry-sdk 2.x→3.0 boundary: it uses `start_transaction`/`set_tag` on 2.x and `start_span`/`set_attribute` on 3.0 (stream mode), chosen automatically at runtime — no change needed when you upgrade the SDK.
+Either way it records, as both span metadata and scope tags:
 
-`sentry_sdk` is not a dependency of this library — if it is not installed or not initialised, the enrichment is a silent no-op.
+- `lambda_task` — the fully-qualified task name (e.g. `myapp.tasks.send_welcome_email`). This is also the task span's name.
+- `lambda_task.message_id`, `lambda_task.n_retries`
+- `lambda_task.runtime` — the execution environment, from the AWS environment: `AWS_LAMBDA_FUNCTION_NAME` on Lambda or `AWS_BATCH_JQ_NAME` (the Batch job queue name) on Batch. Omitted when neither is set (local/eager).
+
+Error attribution relies on the `lambda_task` **tag**, not on the transaction name, so it is reliable even when the trace is not sampled and regardless of whether the task ran as a child span (Lambda) or a root (Batch).
+
+#### Task failures are reported
+
+The executor catches a failing task's exception (recording a `FAILED` `TaskRecord`) rather than re-raising it. So the library calls `sentry_sdk.capture_exception()` itself on the **terminal failure paths** — a plain failure and max-retries-exceeded — to report the error to Sentry. This is essential on 3.0, where a merely-caught exception produces no error event at all.
+
+Transient, retryable failures (a task that will be re-enqueued) are **not** reported, to avoid flooding Sentry on every retry; only the final, terminal failure is captured.
+
+#### SDK version compatibility
+
+The integration is future-proof across the sentry-sdk 2.x→3.0 boundary and verified against both 2.74 and 3.0.0b4. It uses `start_transaction`/`set_tag` on 2.x and `start_span`/`set_attribute` on 3.0 (stream mode), chosen automatically at runtime — no change needed when you upgrade.
+
+`sentry_sdk` is not a dependency of this library — if it is not installed or not initialised, all of the above is a silent no-op.
 
 ---
 

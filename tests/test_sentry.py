@@ -6,6 +6,7 @@ task name — on both Lambda and Batch — and that everything degrades to a no-
 when Sentry is not initialised.
 """
 
+import threading
 import uuid
 from unittest.mock import patch
 
@@ -75,23 +76,54 @@ def _make_message(*, task_name: str, kwargs: dict) -> SQSLambdaTaskMessage:
     return SQSLambdaTaskMessage(task_name=task_name, kwargs=kwargs)
 
 
+def _active_root(name: str):
+    """Start an outer root transaction/segment, as AwsLambdaIntegration would.
+
+    Uses ``start_transaction`` on SDK 2.x and ``start_span`` on 3.0 so the test
+    simulates an already-active invocation trace on both SDK versions.
+    """
+    if hasattr(sentry_sdk, "start_transaction"):
+        return sentry_sdk.start_transaction(name=name, op="function.aws")
+    else:
+        return sentry_sdk.start_span(name=name)
+
+
 class _CapturedTrace:
     """A captured root span/transaction, normalised across SDK 2.x and 3.0.
 
     ``name`` is the task name (the transaction name on 2.x, the span name on
     3.0). ``meta`` merges every place task metadata may live: scope/transaction
-    tags (2.x) and span attributes (3.0).
+    tags (2.x) and span attributes (3.0). ``is_root`` is True when this is a
+    root transaction/segment rather than a child span.
     """
 
-    def __init__(self, *, name: str, meta: dict) -> None:
+    def __init__(self, *, name: str, meta: dict, is_root: bool = True) -> None:
         self.name = name
         self.meta = meta
+        self.is_root = is_root
 
 
-def _normalise_2x_transaction(event: dict) -> _CapturedTrace:
+def _normalise_2x_transaction(event: dict) -> list[_CapturedTrace]:
+    """Flatten a 2.x transaction envelope into its root plus child spans.
+
+    On 2.x child spans are bundled inside the transaction payload rather than
+    sent separately, so we expand them here to mirror the 3.0 shape.
+    """
     trace = event.get("contexts", {}).get("trace", {})
-    meta = {**event.get("tags", {}), **(trace.get("data") or {})}
-    return _CapturedTrace(name=event.get("transaction", ""), meta=meta)
+    root_meta = {**event.get("tags", {}), **(trace.get("data") or {})}
+    traces = [
+        _CapturedTrace(name=event.get("transaction", ""), meta=root_meta, is_root=True)
+    ]
+    for span in event.get("spans", []):
+        meta = {**(span.get("tags") or {}), **(span.get("data") or {})}
+        traces.append(
+            _CapturedTrace(
+                name=span.get("description") or span.get("op") or "",
+                meta=meta,
+                is_root=False,
+            )
+        )
+    return traces
 
 
 def _normalise_3x_spans(payload: dict) -> list[_CapturedTrace]:
@@ -99,7 +131,13 @@ def _normalise_3x_spans(payload: dict) -> list[_CapturedTrace]:
     for span in payload.get("items", []):
         # 3.0 attributes are {key: {"value": ..., "type": ...}}.
         meta = {k: v.get("value") for k, v in span.get("attributes", {}).items()}
-        traces.append(_CapturedTrace(name=span.get("name", ""), meta=meta))
+        traces.append(
+            _CapturedTrace(
+                name=span.get("name", ""),
+                meta=meta,
+                is_root=bool(span.get("is_segment")),
+            )
+        )
     return traces
 
 
@@ -108,23 +146,39 @@ class _CapturingTransport(Transport):
 
     Works on both SDK 2.x (transactions, ``get_transaction_event``) and 3.0
     (stream-mode spans, envelope items of type ``span``).
+
+    Access is guarded by a lock and reads return snapshots: ``sentry_sdk`` may
+    deliver envelopes from a background thread (observed on some 3.x
+    pre-releases), so appends and reads must not race.
     """
 
     def __init__(self, options) -> None:
         super().__init__(options)
-        self.errors: list[dict] = []
-        self.traces: list[_CapturedTrace] = []
+        self._lock = threading.Lock()
+        self._errors: list[dict] = []
+        self._traces: list[_CapturedTrace] = []
 
     def capture_envelope(self, envelope) -> None:
         for item in envelope.items:
             if item.type == "event":
                 error = item.get_event()
                 if error is not None:
-                    self.errors.append(error)
+                    with self._lock:
+                        self._errors.append(error)
             elif item.type == "transaction":  # SDK 2.x
-                self.traces.append(_normalise_2x_transaction(item.payload.json))
+                with self._lock:
+                    self._traces.extend(_normalise_2x_transaction(item.payload.json))
             elif item.type == "span":  # SDK 3.0 stream mode
-                self.traces.extend(_normalise_3x_spans(item.payload.json))
+                with self._lock:
+                    self._traces.extend(_normalise_3x_spans(item.payload.json))
+
+    def snapshot_errors(self) -> list[dict]:
+        with self._lock:
+            return list(self._errors)
+
+    def snapshot_traces(self) -> list[_CapturedTrace]:
+        with self._lock:
+            return list(self._traces)
 
 
 class _Captured:
@@ -135,12 +189,12 @@ class _Captured:
 
     @property
     def errors(self) -> list[dict]:
-        return self._transport.errors
+        return self._transport.snapshot_errors()
 
     @property
     def traces(self) -> list[_CapturedTrace]:
         sentry_sdk.flush()
-        return self._transport.traces
+        return self._transport.snapshot_traces()
 
     def trace_named(self, name: str) -> _CapturedTrace:
         """Return the single captured root trace whose name is *name*.
@@ -151,10 +205,31 @@ class _Captured:
         asynchronously in batches.
         """
         sentry_sdk.flush()
-        matches = [trace for trace in self._transport.traces if trace.name == name]
+        traces = self._transport.snapshot_traces()
+        matches = [trace for trace in traces if trace.name == name]
         assert len(matches) == 1, (
             f"expected exactly one trace named {name!r}, "
-            f"got {[t.name for t in self._transport.traces]}"
+            f"got {[t.name for t in traces]}"
+        )
+        return matches[0]
+
+    def root_names(self) -> list[str]:
+        """Names of all captured root transactions/segments (not child spans).
+
+        Used to assert that a task does not create its own root when it runs
+        inside an already-active trace (the Lambda case).
+        """
+        sentry_sdk.flush()
+        return [t.name for t in self._transport.snapshot_traces() if t.is_root]
+
+    def task_trace(self, name: str) -> _CapturedTrace:
+        """Return the single captured trace (root or child span) named *name*."""
+        sentry_sdk.flush()
+        traces = self._transport.snapshot_traces()
+        matches = [t for t in traces if t.name == name]
+        assert len(matches) == 1, (
+            f"expected exactly one trace named {name!r}, "
+            f"got {[t.name for t in traces]}"
         )
         return matches[0]
 
@@ -295,6 +370,49 @@ class TestTaskScope:
             sentry_sdk.capture_message("inside")
 
         assert "lambda_task.runtime" not in sentry.errors[0]["tags"]
+
+
+# ---------------------------------------------------------------------------
+# Trace nesting / volume (the core of the child-span fix)
+# ---------------------------------------------------------------------------
+
+
+class TestTaskTraceNesting:
+    def test_task_is_child_span_when_trace_already_active(self, sentry):
+        # Lambda case: AwsLambdaIntegration starts an invocation transaction, so
+        # the task must NOT open a second root transaction — it nests as a
+        # child span. This is what keeps task tracing from doubling trace
+        # volume and defeating traces_sample_rate.
+        with _active_root("lambda-invocation"):
+            with task_scope(task_name="myapp.tasks.greet", message_id="m", n_retries=0):
+                pass
+
+        # The task is a child span (not a root), and it did not create its own
+        # root transaction — the only root is the invocation.
+        assert sentry.task_trace("myapp.tasks.greet").is_root is False
+        assert "myapp.tasks.greet" not in sentry.root_names()
+        assert "lambda-invocation" in sentry.root_names()
+
+    def test_task_is_root_when_no_trace_active(self, sentry):
+        # Batch case: no Lambda integration, nothing active, so the task opens
+        # its own root transaction/segment and is traced on its own.
+        with task_scope(task_name="myapp.tasks.greet", message_id="m", n_retries=0):
+            pass
+
+        task_trace = sentry.task_trace("myapp.tasks.greet")
+        assert task_trace.is_root is True
+        assert "myapp.tasks.greet" in sentry.root_names()
+
+    def test_task_child_span_carries_metadata(self, sentry):
+        with _active_root("lambda-invocation"):
+            with task_scope(
+                task_name="myapp.tasks.greet", message_id="mid-9", n_retries=1
+            ):
+                pass
+
+        meta = sentry.task_trace("myapp.tasks.greet").meta
+        assert meta["lambda_task"] == "myapp.tasks.greet"
+        assert meta["lambda_task.message_id"] == "mid-9"
 
 
 # ---------------------------------------------------------------------------
