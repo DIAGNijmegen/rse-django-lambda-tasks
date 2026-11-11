@@ -21,20 +21,6 @@ except ImportError:
     sentry_sdk = None  # ty: ignore[invalid-assignment]
 
 
-def _runtime_environment() -> str | None:
-    """Return the name of the environment the task is executing in.
-
-    On AWS Lambda this is ``AWS_LAMBDA_FUNCTION_NAME``; on AWS Batch it is
-    ``AWS_BATCH_JQ_NAME`` (the Batch job queue the job was submitted to). Both
-    are set by AWS in their respective runtimes. Returns ``None`` when neither
-    is present (e.g. local or eager execution), in which case no runtime tag
-    is recorded.
-    """
-    return os.environ.get("AWS_LAMBDA_FUNCTION_NAME") or os.environ.get(
-        "AWS_BATCH_JQ_NAME"
-    )
-
-
 @contextlib.contextmanager
 def task_scope(*, task_name: str, message_id: str, n_retries: int) -> Iterator[None]:
     """Attribute Sentry events raised inside the block to *task_name*.
@@ -50,18 +36,19 @@ def task_scope(*, task_name: str, message_id: str, n_retries: int) -> Iterator[N
 
     A no-op when ``sentry_sdk`` is unavailable or uninitialised.
     """
-    if sentry_sdk is None or not sentry_sdk.is_initialized():
-        yield
-        return
+    if sentry_sdk and sentry_sdk.is_initialized():
+        with sentry_sdk.new_scope() as scope:
+            scope.set_transaction_name(task_name)
+            scope.set_tag("lambda_task", task_name)
+            scope.set_tag("lambda_task.message_id", message_id)
+            scope.set_tag("lambda_task.n_retries", n_retries)
 
-    with sentry_sdk.new_scope() as scope:
-        scope.set_transaction_name(task_name)
-        scope.set_tag("lambda_task", task_name)
-        scope.set_tag("lambda_task.message_id", message_id)
-        scope.set_tag("lambda_task.n_retries", n_retries)
+            runtime = os.environ.get("AWS_LAMBDA_FUNCTION_NAME") or os.environ.get(
+                "AWS_BATCH_JQ_NAME"
+            )
+            if runtime:
+                scope.set_tag("lambda_task.runtime", runtime)
 
-        runtime = _runtime_environment()
-        if runtime is not None:
-            scope.set_tag("lambda_task.runtime", runtime)
-
+            yield
+    else:
         yield
