@@ -434,48 +434,57 @@ fields @timestamp, @message
 
 ### Sentry
 
-If your application uses Sentry, task errors are automatically attributed to the task that raised them. Without this, Sentry's `AwsLambdaIntegration` names every event's transaction after the Lambda function (so all tasks look the same), and on AWS Batch there is no transaction at all (it shows as `"--"`) — so you cannot tell which task failed.
+If your application uses Sentry, task errors are automatically attributed to the task that raised them, and each task is traced under its own task-named transaction.
 
-Keep your existing `sentry_sdk.init(...)`. On **sentry-sdk 2.x** no change is needed. On **sentry-sdk 3.0+** one option changed default and must be set explicitly if you want error-level logs reported (see below):
+#### Recommended `sentry_sdk.init(...)`
+
+Use `DjangoIntegration` + `LoggingIntegration(event_level=logging.ERROR)`, and **do not** add `AwsLambdaIntegration`:
 
 ```python
 import logging
+from sentry_sdk.integrations.aws_lambda import AwsLambdaIntegration
+from sentry_sdk.integrations.django import DjangoIntegration
 from sentry_sdk.integrations.logging import LoggingIntegration
 
 sentry_sdk.init(
     dsn=SENTRY_DSN,
     integrations=[
         DjangoIntegration(),
-        AwsLambdaIntegration(),
-        # Only needed on sentry-sdk 3.0+: its default event_level is None, so
-        # logger.error(...) no longer becomes a Sentry event. On 2.x this was
-        # the default and setting it is harmless.
         LoggingIntegration(event_level=logging.ERROR),
+    ],
+    disabled_integrations=[
+        AwsLambdaIntegration(),
     ],
     traces_sample_rate=0.1,
 )
 ```
 
+Two deliberate choices:
+
+- **No `AwsLambdaIntegration`.** It names every event's transaction after the Lambda function, which hides which task ran — all tasks would look the same. Without it, each task's trace is named after the task (see below). You lose `AwsLambdaIntegration`'s automatic reporting of handler-level failures, but the library reports those itself (see "Failures outside a task"), so nothing is lost in practice.
+- **`LoggingIntegration(event_level=logging.ERROR)`.** This makes `logger.error(...)` (including `task_logger`) become Sentry events. On sentry-sdk 2.x `event_level=ERROR` was the default; on 3.0 the default is `None`, so you must set it explicitly. It is harmless on 2.x.
+
 #### What the library does per task
 
-When a task runs, `execute_immediately()` opens an isolated Sentry scope and traces the task:
+When a task runs, `execute_immediately()` opens an isolated Sentry scope and traces the task. With `AwsLambdaIntegration` removed there is no invocation transaction competing for the name, so on **both** Lambda and Batch the task starts its **own transaction named after the task**. It records, as both span metadata and scope tags:
 
-- **On Lambda**, the task is traced as a **child span** of the invocation transaction that `AwsLambdaIntegration` already started — not a second transaction. This keeps task tracing from doubling your transaction volume and respects `traces_sample_rate`.
-- **On Batch** (no Lambda integration, nothing active), the task starts **its own root transaction** so it is still traced.
-
-Either way it records, as both span metadata and scope tags:
-
-- `lambda_task` — the fully-qualified task name (e.g. `myapp.tasks.send_welcome_email`). This is also the task span's name.
+- `lambda_task` — the fully-qualified task name (e.g. `myapp.tasks.send_welcome_email`); also the transaction/span name.
 - `lambda_task.message_id`, `lambda_task.n_retries`
 - `lambda_task.runtime` — the execution environment, from the AWS environment: `AWS_LAMBDA_FUNCTION_NAME` on Lambda or `AWS_BATCH_JQ_NAME` (the Batch job queue name) on Batch. Omitted when neither is set (local/eager).
 
-Error attribution relies on the `lambda_task` **tag**, not on the transaction name, so it is reliable even when the trace is not sampled and regardless of whether the task ran as a child span (Lambda) or a root (Batch).
+Error attribution also relies on the `lambda_task` **tag**, so it is reliable even when the trace is not sampled.
+
+> If you keep `AwsLambdaIntegration` for other reasons, the library still does the right thing: it detects the active invocation transaction and traces the task as a **child span** of it (rather than a second, competing transaction, which would double trace volume and defeat `traces_sample_rate`). In that case the transaction name is the Lambda function name and the task name lives on the `lambda_task` tag.
 
 #### Task failures are reported
 
-The executor catches a failing task's exception (recording a `FAILED` `TaskRecord`) rather than re-raising it. So the library calls `sentry_sdk.capture_exception()` itself on the **terminal failure paths** — a plain failure and max-retries-exceeded — to report the error to Sentry. This is essential on 3.0, where a merely-caught exception produces no error event at all.
+The executor catches a failing task's exception (recording a `FAILED` `TaskRecord`) rather than re-raising it. On the **terminal failure paths** — a plain failure and max-retries-exceeded — the library logs the exception at ERROR (`task_logger.error(..., exc_info=True)`), which your `LoggingIntegration(event_level=ERROR)` turns into a Sentry event, attributed to the task via the active scope tags. This is why that integration is part of the recommended config: without it, a merely-caught exception produces no error event on 3.0.
 
-Transient, retryable failures (a task that will be re-enqueued) are **not** reported, to avoid flooding Sentry on every retry; only the final, terminal failure is captured.
+Transient, retryable failures (a task that will be re-enqueued) are logged at WARNING and **not** reported to Sentry, to avoid flooding on every retry; only the final, terminal failure is reported.
+
+#### Failures outside a task
+
+Pre-execution failures in the Lambda/Batch handler — a malformed SQS message, a task that cannot be imported, a misconfiguration, or a cold-start error — happen before the task scope opens and are caught by the handler. The handler logs them at ERROR inside a `handler_error_scope` that tags the event `lambda_task.handler_error` (plus the message id). With `LoggingIntegration(event_level=ERROR)` that log becomes a single, tagged Sentry event — so you are still alerted even though `AwsLambdaIntegration` is not installed. Cold-start failures are also re-raised so AWS marks the invocation failed and redrives it.
 
 #### SDK version compatibility
 

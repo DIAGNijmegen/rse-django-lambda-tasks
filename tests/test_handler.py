@@ -34,6 +34,50 @@ def _patch_close_old_connections():
         yield
 
 
+class _SentryCapture:
+    """Minimal in-memory Sentry transport exposing captured error events."""
+
+    def __init__(self) -> None:
+        self.errors: list[dict] = []
+
+
+@pytest.fixture
+def sentry_errors():
+    """Initialise Sentry with LoggingIntegration(event_level=ERROR) + capture.
+
+    Mirrors the assumed host configuration: error-level logs become Sentry
+    events. Yields the list of captured error events.
+    """
+    import logging as _logging
+
+    import sentry_sdk
+    from sentry_sdk.integrations.logging import LoggingIntegration
+    from sentry_sdk.transport import Transport
+
+    captured = _SentryCapture()
+
+    class _Transport(Transport):
+        def __init__(self, options) -> None:
+            super().__init__(options)
+
+        def capture_envelope(self, envelope) -> None:
+            for item in envelope.items:
+                if item.type == "event":
+                    event = item.get_event()
+                    if event is not None:
+                        captured.errors.append(event)
+
+    sentry_sdk.init(
+        dsn="http://public@localhost/1",
+        transport=_Transport({}),
+        integrations=[LoggingIntegration(event_level=_logging.ERROR)],
+    )
+    try:
+        yield captured.errors
+    finally:
+        sentry_sdk.get_global_scope().set_client(None)
+
+
 # ---------------------------------------------------------------------------
 # Signature test
 # ---------------------------------------------------------------------------
@@ -172,6 +216,30 @@ class TestHandlerInvalidJson:
         record = _make_record("msg-bad-json", "not valid json {{{")
         result = handler(event={"Records": [record]}, context=None)
         assert result == {"batchItemFailures": [{"itemIdentifier": "msg-bad-json"}]}
+
+
+class TestHandlerReportsPreExecutionFailuresToSentry:
+    def test_handler_failure_reports_tagged_event(self, sentry_errors):
+        """A pre-execution failure is reported to Sentry (via the error log +
+        LoggingIntegration), tagged as a handler error with the record's
+        messageId."""
+        record = _make_record("msg-bad-json", "not valid json {{{")
+        result = handler(event={"Records": [record]}, context=None)
+
+        assert result == {"batchItemFailures": [{"itemIdentifier": "msg-bad-json"}]}
+        assert len(sentry_errors) == 1
+        tags = sentry_errors[0].get("tags") or {}
+        assert tags.get("lambda_task.handler_error") in (True, "True")
+        assert tags.get("lambda_task.message_id") == "msg-bad-json"
+
+    def test_successful_record_does_not_report(self, sentry_errors):
+        """A record that executes cleanly produces no handler-error event."""
+        record = _make_record("msg-ok", _valid_body())
+        with patch("lambda_tasks.models.SQSLambdaTaskMessage.model_validate_json"):
+            result = handler(event={"Records": [record]}, context=None)
+
+        assert result == {"batchItemFailures": []}
+        assert sentry_errors == []
 
 
 class TestHandlerIndependentProcessing:
@@ -533,3 +601,75 @@ class TestHandlerClosesOldConnections:
             handler(event={"Records": records}, context=None)
 
         assert close_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Sentry reporting for failures outside a task scope: main() + cold start
+# ---------------------------------------------------------------------------
+
+
+class TestMainReportsToSentry:
+    def test_missing_message_env_var_reports_and_returns_1(
+        self, monkeypatch, sentry_errors
+    ):
+        import lambda_tasks.handler as handler_module
+
+        monkeypatch.delenv("LAMBDA_TASKS_MESSAGE", raising=False)
+        rc = handler_module.main()
+
+        assert rc == 1
+        assert len(sentry_errors) == 1
+        tags = sentry_errors[0].get("tags") or {}
+        assert tags.get("lambda_task.handler_error") in (True, "True")
+
+    def test_handler_failure_reports_and_returns_1(self, monkeypatch, sentry_errors):
+        import lambda_tasks.handler as handler_module
+
+        monkeypatch.setenv("LAMBDA_TASKS_MESSAGE", _valid_body())
+        monkeypatch.setenv("AWS_BATCH_JOB_ID", "batch-job-7")
+        with patch.object(
+            handler_module, "handler", side_effect=RuntimeError("cold start boom")
+        ):
+            rc = handler_module.main()
+
+        assert rc == 1
+        assert len(sentry_errors) == 1
+        tags = sentry_errors[0].get("tags") or {}
+        assert tags.get("lambda_task.handler_error") in (True, "True")
+        assert tags.get("lambda_task.message_id") == "batch-job-7"
+
+    def test_success_does_not_report(self, monkeypatch, sentry_errors):
+        import lambda_tasks.handler as handler_module
+
+        monkeypatch.setenv("LAMBDA_TASKS_MESSAGE", _valid_body())
+        with patch.object(
+            handler_module,
+            "handler",
+            return_value={"batchItemFailures": []},
+        ):
+            rc = handler_module.main()
+
+        assert rc == 0
+        assert sentry_errors == []
+
+
+class TestColdStartFailureReportsToSentry:
+    def test_cold_start_failure_reports_and_reraises(self, monkeypatch, sentry_errors):
+        import lambda_tasks.handler as handler_module
+
+        handler_module._cold_start_done = False
+        with patch.object(
+            handler_module,
+            "_perform_cold_start",
+            side_effect=RuntimeError("django.setup failed"),
+        ):
+            with pytest.raises(RuntimeError, match="django.setup failed"):
+                handler_module.handler(
+                    event={"Records": [_make_record("m", _valid_body())]},
+                    context=None,
+                )
+
+        # Reported to Sentry, and re-raised so AWS marks the invocation failed.
+        assert len(sentry_errors) == 1
+        tags = sentry_errors[0].get("tags") or {}
+        assert tags.get("lambda_task.handler_error") in (True, "True")

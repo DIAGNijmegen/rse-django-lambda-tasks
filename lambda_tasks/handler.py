@@ -26,6 +26,7 @@ from django.apps import apps
 
 from lambda_tasks.environment_loader import resolve_environment
 from lambda_tasks.secret_loader import resolve_secrets_into_env
+from lambda_tasks.sentry import handler_error_scope
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,17 @@ def handler(event: dict, context: object) -> dict:
     Returns a partial-batch failure report so AWS only re-drives failed records.
     Signature is fixed by AWS and uses two args only.
     """
-    _perform_cold_start()
+    try:
+        _perform_cold_start()
+    except Exception:
+        # Cold-start failures (secret resolution, django.setup(), memory limit)
+        # escape handler() so the invocation is marked failed and redriven, as
+        # AWS expects. The error log is reported to Sentry by the host's
+        # LoggingIntegration; handler_error_scope tags it as a handler error.
+        # Re-raise to preserve the AWS failure contract.
+        with handler_error_scope():
+            logger.error("Cold-start initialisation failed", exc_info=True)
+        raise
 
     # Local import due to AppRegistryNotReady
     from lambda_tasks.models import SQSLambdaTaskMessage
@@ -138,10 +149,13 @@ def handler(event: dict, context: object) -> dict:
                 record["body"]
             ).execute_immediately(message_id=record["messageId"])
         except Exception:
-            logger.error(
-                "Failed to process SQS record",
-                exc_info=True,
-            )
+            # Pre-execution failures (malformed message, import error,
+            # misconfiguration) happen before execute_immediately opens its
+            # task_scope. The error log is reported to Sentry by the host's
+            # LoggingIntegration; handler_error_scope tags it with the message
+            # id and marks it a handler error.
+            with handler_error_scope(message_id=record.get("messageId")):
+                logger.error("Failed to process SQS record", exc_info=True)
             batch_item_failures.append({"itemIdentifier": record["messageId"]})
 
     return {"batchItemFailures": batch_item_failures}
@@ -154,20 +168,30 @@ def main() -> int:
     constructs a synthetic SQS event, and delegates to handler().
 
     Returns 0 on success, 1 on failure.
+
+    Wrapped in a top-level handler so that failures on the Batch path — a
+    missing message, or an exception escaping cold-start/``handler()`` (e.g.
+    secret resolution or ``django.setup()``) — are reported to Sentry. The
+    Batch container has no AWS-side Sentry integration, so without this such
+    failures would only reach stderr.
     """
     logging.basicConfig(level=logging.INFO)
 
-    message_json = os.environ.get("LAMBDA_TASKS_MESSAGE")
-    if not message_json:
-        logger.error("LAMBDA_TASKS_MESSAGE environment variable is not set.")
+    try:
+        message_json = os.environ.get("LAMBDA_TASKS_MESSAGE")
+        if not message_json:
+            raise RuntimeError("LAMBDA_TASKS_MESSAGE environment variable is not set.")
+
+        message_id = os.environ.get("AWS_BATCH_JOB_ID", str(uuid.uuid4()))
+
+        result = handler(
+            event={"Records": [{"messageId": message_id, "body": message_json}]},
+            context=None,
+        )
+    except Exception:
+        with handler_error_scope(message_id=os.environ.get("AWS_BATCH_JOB_ID")):
+            logger.error("AWS Batch entry point failed", exc_info=True)
         return 1
-
-    message_id = os.environ.get("AWS_BATCH_JOB_ID", str(uuid.uuid4()))
-
-    result = handler(
-        event={"Records": [{"messageId": message_id, "body": message_json}]},
-        context=None,
-    )
 
     if result["batchItemFailures"]:
         return 1
