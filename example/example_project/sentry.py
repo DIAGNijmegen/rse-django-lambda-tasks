@@ -36,13 +36,20 @@ def init_sentry() -> None:
         dsn=dsn,
         integrations=[
             DjangoIntegration(),
-            AwsLambdaIntegration(),
-            # On sentry-sdk 2.x the logging integration defaulted to
-            # event_level=ERROR, so logger.error(...) calls (e.g. task_logger)
-            # became Sentry events automatically. On 3.0 the default is None, so
-            # error logs no longer surface as events. Set it explicitly so
-            # task_logger.error output appears in Sentry on both SDK versions.
+            # LoggingIntegration(event_level=ERROR) is REQUIRED, not optional:
+            # the library reports task and handler failures by logging them at
+            # ERROR (not by calling capture_exception), so this integration is
+            # what turns those logs into Sentry events. On sentry-sdk 2.x
+            # event_level=ERROR was the default; on 3.0 the default is None, so
+            # it must be set explicitly.
             LoggingIntegration(event_level=logging.ERROR),
+        ],
+        disabled_integrations=[
+            # AwsLambdaIntegration is intentionally omitted. It names every
+            # event's transaction after the Lambda function, which hides the
+            # task name. Without it, each task's trace is named after the task
+            # (see lambda_tasks.sentry).
+            AwsLambdaIntegration(),
         ],
         # Sample every transaction so the per-task trace is always sent while
         # you are testing. Lower this in a real deployment.

@@ -22,7 +22,7 @@ from lambda_tasks.models import (
     SQSLambdaTaskMessage,
     TaskRecord,
 )
-from lambda_tasks.sentry import task_scope
+from lambda_tasks.sentry import handler_error_scope, task_scope
 from lambda_tasks.settings import LambdaTasksSettings
 
 # ---------------------------------------------------------------------------
@@ -437,10 +437,13 @@ class TestExecuteImmediatelySentry:
         assert sentry.errors[0]["transaction"] == task_name
         assert sentry.errors[0]["tags"]["lambda_task.message_id"] == message_id
 
-    def test_failing_task_reports_error_attributed_to_task_name(self, sentry):
-        # The task body is a plain `raise` (no capture_exception). The library's
-        # failure path reports it to Sentry — consistently on SDK 2.x and 3.0,
-        # where a merely-caught exception would otherwise produce no error.
+    def test_failing_task_reports_error_attributed_to_task_name(
+        self, sentry_with_logging
+    ):
+        # The task body is a plain `raise`. The library logs it at ERROR, which
+        # the host's LoggingIntegration turns into a Sentry event — attributed
+        # to the task via the active task_scope tags. Consistent on 2.x and 3.0.
+        sentry = sentry_with_logging
         task_name = _task_name(_sentry_task_raises)
         message = _make_message(task_name=task_name, kwargs={"msg": "boom"})
         message_id = str(uuid.uuid4())
@@ -450,11 +453,10 @@ class TestExecuteImmediatelySentry:
 
         record = TaskRecord.objects.get(pk=message_id)
         assert record.status == TaskRecord.TaskStatus.FAILED
-        assert sentry.trace_named(task_name).name == task_name
 
-        assert len(sentry.errors) == 1
-        error = sentry.errors[0]
-        assert error["transaction"] == task_name
+        errors_with_exc = [e for e in sentry.errors if e.get("exception")]
+        assert len(errors_with_exc) == 1
+        error = errors_with_exc[0]
         assert error["tags"]["lambda_task"] == task_name
         assert error["tags"]["lambda_task.message_id"] == message_id
         exc_types = [v["type"] for v in error["exception"]["values"]]
@@ -468,9 +470,11 @@ class TestExecuteImmediatelySentry:
 
 @pytest.mark.django_db(transaction=True)
 class TestTaskFailureReporting:
-    def test_terminal_failure_captures_exception_event(self, sentry):
-        # Plain-failure branch: the library calls capture_exception, producing a
-        # single error event with the task's exception type — on 2.x and 3.0.
+    def test_terminal_failure_reports_exception_event(self, sentry_with_logging):
+        # Plain-failure branch: the library logs the exception at ERROR; with the
+        # host's LoggingIntegration that becomes a single Sentry event with the
+        # task's exception type — on 2.x and 3.0.
+        sentry = sentry_with_logging
         task_name = _task_name(_sentry_task_raises)
         message = _make_message(task_name=task_name, kwargs={"msg": "kaboom"})
         message_id = str(uuid.uuid4())
@@ -481,13 +485,16 @@ class TestTaskFailureReporting:
         assert TaskRecord.objects.get(pk=message_id).status == (
             TaskRecord.TaskStatus.FAILED
         )
-        assert len(sentry.errors) == 1
-        exc_types = [v["type"] for v in sentry.errors[0]["exception"]["values"]]
+        errors_with_exc = [e for e in sentry.errors if e.get("exception")]
+        assert len(errors_with_exc) == 1
+        exc_types = [v["type"] for v in errors_with_exc[0]["exception"]["values"]]
         assert exc_types == ["RuntimeError"]
 
-    def test_max_retries_exceeded_captures_exception_event(self, sentry):
-        # Max-retries terminal branch: the library captures the exception before
-        # raising MaxRetriesExceededError, so the original failure is reported.
+    def test_max_retries_exceeded_reports_exception_event(self, sentry_with_logging):
+        # Max-retries terminal branch: the library logs the exception at ERROR
+        # before raising MaxRetriesExceededError, so the original failure is
+        # reported (via LoggingIntegration).
+        sentry = sentry_with_logging
         task_name = _task_name(_sentry_task_retryable)
         message = SQSLambdaTaskMessage(
             task_name=task_name,
@@ -506,17 +513,18 @@ class TestTaskFailureReporting:
         assert TaskRecord.objects.get(pk=message_id).status == (
             TaskRecord.TaskStatus.FAILED
         )
-        # The captured event is the task's own exception, attributed to the task.
+        # The reported event is the task's own exception, attributed to the task.
         errors_with_exc = [e for e in sentry.errors if e.get("exception")]
         assert len(errors_with_exc) == 1
         exc_types = [v["type"] for v in errors_with_exc[0]["exception"]["values"]]
         assert "RuntimeError" in exc_types
-        assert errors_with_exc[0]["transaction"] == task_name
+        assert errors_with_exc[0]["tags"]["lambda_task"] == task_name
 
-    def test_retrying_failure_does_not_capture_exception_event(self, sentry):
+    def test_retrying_failure_is_not_reported(self, sentry_with_logging):
         # Non-terminal retry branch: the task will be re-enqueued, so the library
-        # deliberately does NOT report the transient failure to Sentry (avoiding
-        # noise on every retry). Only terminal failures are captured.
+        # logs the retry at WARNING (not ERROR) and does not report it to Sentry
+        # — avoiding noise on every retry. Only terminal failures are reported.
+        sentry = sentry_with_logging
         task_name = _task_name(_sentry_task_retryable)
         message = SQSLambdaTaskMessage(
             task_name=task_name,
@@ -564,3 +572,52 @@ class TestTaskFailureReporting:
         assert log_events[0]["level"] == "error"
         # The error log is attributed to the running task.
         assert log_events[0]["transaction"] == task_name
+
+
+# ---------------------------------------------------------------------------
+# Handler-level failure reporting (outside any task scope)
+# ---------------------------------------------------------------------------
+
+
+class TestHandlerErrorScope:
+    def test_tags_apply_to_logged_event(self, sentry_with_logging):
+        # handler_error_scope tags the scope; an error log inside it (captured
+        # by LoggingIntegration) carries the tags.
+        import logging
+
+        with handler_error_scope(message_id="msg-123"):
+            try:
+                raise ValueError("malformed SQS message")
+            except ValueError:
+                logging.getLogger("lambda_tasks.handler").error("failed", exc_info=True)
+
+        errors = [e for e in sentry_with_logging.errors if e.get("exception")]
+        assert len(errors) == 1
+        tags = errors[0].get("tags") or {}
+        assert tags.get("lambda_task.handler_error") in (True, "True")
+        assert tags.get("lambda_task.message_id") == "msg-123"
+        exc_types = [v["type"] for v in errors[0]["exception"]["values"]]
+        assert "ValueError" in exc_types
+
+    def test_message_id_optional(self, sentry_with_logging):
+        import logging
+
+        with handler_error_scope():
+            try:
+                raise ValueError("no message id")
+            except ValueError:
+                logging.getLogger("lambda_tasks.handler").error("failed", exc_info=True)
+
+        errors = [e for e in sentry_with_logging.errors if e.get("exception")]
+        assert len(errors) == 1
+        assert "lambda_task.message_id" not in (errors[0].get("tags") or {})
+
+    def test_noop_when_sentry_uninitialised(self):
+        # No sentry_sdk.init() — the context manager must still work.
+        with handler_error_scope(message_id="m"):
+            pass
+
+    def test_noop_when_sentry_module_missing(self):
+        with patch("lambda_tasks.sentry.sentry_sdk", None):
+            with handler_error_scope(message_id="m"):
+                pass

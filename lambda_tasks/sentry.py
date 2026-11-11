@@ -120,23 +120,38 @@ def _start_task_root(*, task_name: str) -> Any:
             return sentry_sdk.start_transaction(name=task_name, op="task")
 
 
-def capture_task_exception() -> None:
-    """Report the exception currently being handled to Sentry.
+def handler_error_scope(
+    *, message_id: str | None = None
+) -> "contextlib.AbstractContextManager[Any]":
+    """Scope a handler-level failure's tags so a subsequent error *log* carries them.
 
-    The executor catches task exceptions (recording a ``FAILED`` TaskRecord)
-    rather than re-raising, so the exception never propagates to an integration
-    that would report it. This matters most on SDK 3.0 (stream mode), where a
-    caught exception produces no error event at all — on 2.x the exception
-    happened to still be reported as it passed through the active span. Calling
-    this on the terminal failure path gives consistent error reporting on both
-    SDK versions.
+    Pre-execution failures in the Lambda/Batch handler (malformed message,
+    un-importable task, misconfiguration, cold-start errors) happen outside any
+    task scope. The handler logs them at ERROR; with the host's
+    ``LoggingIntegration(event_level=ERROR)`` that log becomes the Sentry event.
+    Entering this context first tags an isolated scope so the resulting event is
+    distinguishable (``lambda_task.handler_error``) and carries the message id.
 
-    Must be called from within an ``except`` block while the task's
-    :func:`task_scope` is still active, so the error carries the task name and
-    tags. A no-op when ``sentry_sdk`` is unavailable or uninitialised.
+    Usage::
+
+        with handler_error_scope(message_id=...):
+            logger.error("...", exc_info=True)
+
+    A no-op (returns a null context) when ``sentry_sdk`` is unavailable or
+    uninitialised.
     """
-    if sentry_sdk and sentry_sdk.is_initialized():
-        sentry_sdk.capture_exception()
+    if not (sentry_sdk and sentry_sdk.is_initialized()):
+        return contextlib.nullcontext()
+
+    @contextlib.contextmanager
+    def _scope() -> Iterator[None]:
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("lambda_task.handler_error", True)
+            if message_id is not None:
+                scope.set_tag("lambda_task.message_id", message_id)
+            yield
+
+    return _scope()
 
 
 @contextlib.contextmanager
